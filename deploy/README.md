@@ -12,7 +12,10 @@ reach the same RDS MySQL, Mongo and ElastiCache Redis.
 - **RDS security group:** allow inbound 3306 from the instance's security group.
 - **ElastiCache security group:** allow inbound 6379 from the instance's security group.
 - **Mongo (Atlas):** add the instance's public IP (Elastic IP recommended) to the access list.
-- **DNS:** an `A` record `ide-api.atomesus.com` → the instance's Elastic IP.
+- **DNS (Cloudflare):** an `A` record `ide-api` → the instance's Elastic IP. Proxied (orange
+  cloud) works: the certificate is issued over HTTP through the proxy, Cloudflare's SSL mode
+  must be Full (strict), and nginx reads the client IP from `CF-Connecting-IP`
+  (`/etc/nginx/conf.d/cloudflare-realip.conf`, written by the setup script).
 
 ## 2. Server (once)
 

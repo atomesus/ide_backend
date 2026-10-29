@@ -34,6 +34,12 @@ else
   sudo cp "$HERE/nginx-ide-api.conf" "$SITE"
 fi
 sudo sed -i "s/ide-api.atomesus.com/$DOMAIN/g" "$SITE"
+
+# The domain is proxied by Cloudflare: take the client address from CF-Connecting-IP,
+# but only when the request really comes from a Cloudflare edge range.
+{ echo "# Cloudflare edge ranges (https://www.cloudflare.com/ips); rerun setup to refresh."
+  for ip in $(curl -fsS https://www.cloudflare.com/ips-v4) $(curl -fsS https://www.cloudflare.com/ips-v6); do echo "set_real_ip_from $ip;"; done
+  echo "real_ip_header CF-Connecting-IP;"; } | sudo tee /etc/nginx/conf.d/cloudflare-realip.conf > /dev/null
 command -v pm2 > /dev/null || sudo npm install -g pm2
 sudo nginx -t
 sudo systemctl enable --now nginx
