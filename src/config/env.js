@@ -97,17 +97,28 @@ const schema = z.object({
   XAI_GROK_CLIENT_ID: str(""),
   PROVIDER_RELAY_TIMEOUT_MS: int(20000),
 
+  // Hosted models. Each model in src/config/models.js names one of these providers.
   ATOMESUS_BASE_URL: str(""),
   ATOMESUS_MODEL: str("ethos-6"),
   ATOMESUS_API_KEY: str(""),
   ATOMESUS_HOSTED_CHAT_API_KEY: str(""),
   ATOMESUS_MAX_CONTEXT_TOKENS: int(256000),
+  CLAUDE_API_KEY: str(""),
+  ANTHROPIC_BASE_URL: str("https://api.anthropic.com/v1"),
+  OPENAI_API_KEY: str(""),
+  OPENAI_BASE_URL: str("https://api.openai.com/v1"),
+  // JSON array overriding or adding catalog entries (by id); see src/config/models.js.
+  IDE_MODELS: str(""),
   ATOMESUS_MODELS: str(""),
   CHAT_UPSTREAM_TIMEOUT_MS: int(90000),
-  FREE_PLAN_MONTHLY_CREDITS: int(200),
-  PRO_PLAN_MONTHLY_CREDITS: int(5000),
-  INPUT_CREDIT_MULTIPLIER: z.string().optional().transform((v) => (v ? Number(v) || 1 : 1)),
-  OUTPUT_CREDIT_MULTIPLIER: z.string().optional().transform((v) => (v ? Number(v) || 3 : 3)),
+
+  // Money. Wallets are kept in credits of Rs 0.0001; model prices are in USD.
+  USD_INR_RATE: z.string().optional().transform((v) => (v && Number(v) > 0 ? Number(v) : 90)),
+  // JSON object: IDE plan key -> monthly hosted-model budget in rupees (30% margin after
+  // GST and payment fees). Keys: ide_299, ide_999 (India, INR) and *_intl (USD plans).
+  IDE_PLAN_ALLOWANCES_INR: str('{"ide_299":172,"ide_999":576,"ide_299_intl":220,"ide_999_intl":580}'),
+  ETHOS_MAX_CONCURRENT_PER_USER: int(2),
+  CHAT_MAX_CONCURRENT_PER_USER: int(3),
 });
 
 function loadConfig(env = process.env) {
@@ -121,6 +132,19 @@ function loadConfig(env = process.env) {
   c.isTest = c.NODE_ENV === "test";
   if (c.DESKTOP_REDIRECT_SCHEMES.length === 0) c.DESKTOP_REDIRECT_SCHEMES = ["atomesus", "orbit"];
   if (!c.ATOMESUS_API_KEY && c.ATOMESUS_HOSTED_CHAT_API_KEY) c.ATOMESUS_API_KEY = c.ATOMESUS_HOSTED_CHAT_API_KEY;
+  c.planAllowancesInr = {};
+  if (c.IDE_PLAN_ALLOWANCES_INR) {
+    let parsed;
+    try {
+      parsed = JSON.parse(c.IDE_PLAN_ALLOWANCES_INR);
+    } catch {
+      throw new Error("Invalid environment:\n  IDE_PLAN_ALLOWANCES_INR: must be a JSON object like {\"core\":172,\"prime\":576}");
+    }
+    for (const [plan, inr] of Object.entries(parsed || {})) {
+      const n = Number(inr);
+      if (Number.isFinite(n) && n >= 0) c.planAllowancesInr[String(plan).trim().toLowerCase()] = n;
+    }
+  }
   c.API_PUBLIC_URL = c.API_PUBLIC_URL.replace(/\/+$/, "");
   c.WEB_APP_URL = c.WEB_APP_URL.replace(/\/+$/, "");
   return c;
@@ -144,7 +168,10 @@ function auditConfig(c) {
   if (c.DB_DIALECT !== "sqlite" && !c.DB_NAME) errors.push("DB_NAME must be the platform database that holds the Users table");
   if (c.isProd && !c.REDIS_URL && !c.REDIS_HOST) warnings.push("Redis not configured: rate limits and sign-in codes are per-process only");
   if (c.isProd && c.REDIS_REQUIRED === false) warnings.push("REDIS_REQUIRED=false in production; multi-instance deployments need Redis");
-  if (!c.ATOMESUS_BASE_URL) warnings.push("ATOMESUS_BASE_URL unset: /api/v1/chat/completions will answer 503");
+  if (!c.ATOMESUS_BASE_URL) warnings.push("ATOMESUS_BASE_URL unset: Ethos models are hidden");
+  if (!c.CLAUDE_API_KEY) warnings.push("CLAUDE_API_KEY unset: Claude models are hidden");
+  if (!c.OPENAI_API_KEY) warnings.push("OPENAI_API_KEY unset: GPT models are hidden");
+  if (Object.keys(c.planAllowancesInr || {}).length === 0) warnings.push("IDE_PLAN_ALLOWANCES_INR unset: no plan gets hosted models (BYOK still works on paid plans)");
   if (c.isProd && !c.API_PUBLIC_URL.startsWith("https://")) errors.push("API_PUBLIC_URL must be https in production");
   if (c.isProd && !c.WEB_APP_URL.startsWith("https://")) errors.push("WEB_APP_URL must be the https website that hosts /desktop/login");
   return { errors, warnings };

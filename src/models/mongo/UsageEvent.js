@@ -10,7 +10,8 @@ const UsageEventSchema = new mongoose.Schema(
     cachedTokens: { type: Number, default: 0 },
     completionTokens: { type: Number, default: 0 },
     creditsDeducted: { type: Number, default: 0 },
-    status: { type: String, enum: ["ok", "error", "aborted"], default: "ok" },
+    // ":estimated" = no usage report from the provider; tokens were estimated from the text.
+    status: { type: String, enum: ["ok", "error", "aborted", "ok:estimated", "error:estimated", "aborted:estimated"], default: "ok" },
     latencyMs: Number,
     at: { type: Date, default: Date.now, index: true },
   },

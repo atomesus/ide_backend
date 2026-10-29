@@ -18,6 +18,7 @@ const SHARED_KEYS = [
   "REDIS_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_USERNAME", "REDIS_PASSWORD", "REDIS_TLS", "REDIS_REQUIRED",
   "LOGIN_IP_MAX_PER_15MIN",
   "ATOMESUS_BASE_URL", "ATOMESUS_MODEL", "ATOMESUS_HOSTED_CHAT_API_KEY", "ATOMESUS_MAX_CONTEXT_TOKENS",
+  "CLAUDE_API_KEY", "OPENAI_API_KEY",
 ];
 // DB_NAME IS shared on purpose: accounts live in the platform database (its Users table).
 // Intentionally NOT shared: PORT, MONGO_DB_NAME (this service keeps its own Mongo database).

@@ -2,16 +2,24 @@ const { isMongoReady } = require("../db/mongo");
 const { UsageEvent } = require("../models/mongo");
 const { config } = require("../config/env");
 const wallets = require("./walletService");
-const { planOf, monthlyCreditsFor } = require("./userService");
+const { planOf, monthlyCreditsFor, entitlements, CREDITS_PER_RUPEE } = require("./userService");
 const logger = require("../lib/logger");
 
-/** Credits for a usage record: tokens/1000 * multiplier, rounded up per side. */
-function creditsFor({ promptTokens = 0, cachedTokens = 0, completionTokens = 0 }, model) {
-  const inMul = model?.inputCreditMultiplier ?? config.INPUT_CREDIT_MULTIPLIER;
-  const outMul = model?.outputCreditMultiplier ?? config.OUTPUT_CREDIT_MULTIPLIER;
-  const billableInput = Math.max(0, promptTokens - cachedTokens) + cachedTokens * 0.1;
-  return Math.ceil((billableInput / 1000) * inMul + (completionTokens / 1000) * outMul);
+/** Provider cost of one request in USD, from the model's list prices. */
+function costUsd({ promptTokens = 0, cachedTokens = 0, completionTokens = 0 }, model) {
+  let price = model?.priceUsdPerMTok || { input: 0, cachedInput: 0, output: 0 };
+  if (model?.longContext && promptTokens > model.longContext.overInputTokens) price = model.longContext.priceUsdPerMTok;
+  const cached = Math.min(cachedTokens, promptTokens);
+  const cachedPrice = price.cachedInput ?? price.input;
+  return ((promptTokens - cached) * price.input + cached * cachedPrice + completionTokens * price.output) / 1e6;
 }
+
+/** Wallet credits (Rs 0.0001 each) for a request, rounded up. */
+function creditsFor(tokens, model) {
+  return Math.ceil(costUsd(tokens, model) * config.USD_INR_RATE * CREDITS_PER_RUPEE);
+}
+
+const rupees = (credits) => (Math.max(0, credits) / CREDITS_PER_RUPEE).toFixed(2);
 
 /** Credits the user can still spend right now. */
 async function availableFor(user) {
@@ -53,16 +61,19 @@ async function usageSummary(user) {
   const periodStart = wallet.billingPeriodStart ? new Date(wallet.billingPeriodStart) : new Date();
   const [period, last30] = await Promise.all([sumCredits(user.id, periodStart), sumCredits(user.id, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))]);
   const plan = planOf(user);
+  // Amounts are rupees with two decimals (the IDE shows them with the currency below).
   return {
+    currency: "INR",
     wallet: {
-      availableCredits: String(wallets.available(wallet)),
-      subscriptionCredits: String(wallet.subscriptionCredits || 0),
-      topUpCredits: String(wallet.topUpCredits || 0),
+      availableCredits: rupees(wallets.available(wallet)),
+      subscriptionCredits: rupees(wallet.subscriptionCredits || 0),
+      topUpCredits: rupees(wallet.topUpCredits || 0),
     },
-    limits: { plan, monthlyCredits: String(monthlyCreditsFor(plan)) },
-    billingPeriod: period == null ? null : { start: periodStart.toISOString(), totalCreditsDeducted: period },
-    last30Days: { totalCreditsDeducted: last30 ?? 0 },
+    limits: { plan, monthlyCredits: rupees(monthlyCreditsFor(plan)) },
+    entitlements: entitlements(user),
+    billingPeriod: period == null ? null : { start: periodStart.toISOString(), totalCreditsDeducted: Number(rupees(period)) },
+    last30Days: { totalCreditsDeducted: Number(rupees(last30 ?? 0)) },
   };
 }
 
-module.exports = { creditsFor, availableFor, recordUsage, usageSummary };
+module.exports = { costUsd, creditsFor, availableFor, recordUsage, usageSummary };

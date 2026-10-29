@@ -2,6 +2,8 @@ const { bootTestApp, shutdownTestApp, createPlatformUser, request } = require(".
 const gateway = require("../src/services/modelGatewayService");
 const { IdeWallet } = require("../src/models/sql");
 const wallets = require("../src/services/walletService");
+const { creditsFor } = require("../src/services/usageService");
+const { kv } = require("../src/db/redis");
 
 let app;
 beforeAll(async () => { app = await bootTestApp(); });
@@ -20,51 +22,93 @@ function sse(lines) {
   });
 }
 
+const okStream = (usage) => new Response(sse([
+  'data: {"id":"1","choices":[{"delta":{"content":"Hello"}}]}',
+  `data: ${JSON.stringify({ id: "1", choices: [], usage })}`,
+  "data: [DONE]",
+]), { status: 200, headers: { "content-type": "text/event-stream" } });
+
+const chat = (token, model, extra = {}) => request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model, messages: [{ role: "user", content: "hi" }], stream: true, ...extra });
+
 describe("model gateway", () => {
-  it("streams SSE through and bills credits from the usage chunk", async () => {
-    const { token } = await createPlatformUser(app);
-    let captured;
-    global.fetch = jest.fn(async (url, init) => {
-      captured = { url, body: JSON.parse(init.body), headers: init.headers };
-      return new Response(sse([
-        'data: {"id":"1","choices":[{"delta":{"content":"Hello"}}]}',
-        'data: {"id":"1","choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":1000,"prompt_tokens_details":{"cached_tokens":0}}}',
-        "data: [DONE]",
-      ]), { status: 200, headers: { "content-type": "text/event-stream" } });
-    });
-    const res = await request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model: "ethos-6", messages: [{ role: "user", content: "hi" }], stream: true }).expect(200);
-    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
-    expect(res.text).toMatch(/Hello/);
-    expect(res.text).toMatch(/\[DONE\]/);
-    expect(captured.url).toBe("http://upstream.test/v1/chat/completions");
-    expect(captured.body.stream_options.include_usage).toBe(true);
-    // 2k input *1 /1000 = 2, 1k output *3 /1000 = 3 => 5 credits
-    await new Promise((r) => setTimeout(r, 50));
-    const usage = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
-    expect(usage.body.wallet.availableCredits).toBe("5");
+  it("lists every model under its real name with its provider", async () => {
+    const { token } = await createPlatformUser(app, { idePlan: "ide_299" });
+    const res = await request(app).get("/api/v1/models").set("authorization", `Bearer ${token}`).expect(200);
+    const byId = Object.fromEntries(res.body.data.map((m) => [m.id, m]));
+    expect(Object.keys(byId)).toEqual(["ethos-6", "claude-sonnet-5-5", "claude-haiku-5-5", "gpt-5.6-luna", "gpt-5-nano"]);
+    expect(byId["claude-haiku-5-5"].orbit).toMatchObject({ displayName: "Claude Haiku 5.5", provider: "anthropic", contextWindow: 100000 });
+    expect(byId["gpt-5.6-luna"].orbit.displayName).toBe("GPT-5.6 Luna");
+    expect(byId["claude-sonnet-5-5"].orbit.inputCreditMultiplier * 1e6).toBeCloseTo(2);
+    expect(byId["claude-sonnet-5-5"].orbit.outputCreditMultiplier * 1e6).toBeCloseTo(10);
   });
 
-  it("answers 402 with insufficient_credits when the wallet is empty", async () => {
-    const { token, user } = await createPlatformUser(app);
-    await wallets.ensureWallet(user);
+  it("refuses free accounts and chat-plan accounts without an IDE plan", async () => {
+    const free = await createPlatformUser(app);
+    global.fetch = jest.fn();
+    const r1 = await chat(free.token, "claude-haiku-5-5").expect(402);
+    expect(r1.body.error.code).toBe("plan_required");
+    const chatOnly = await createPlatformUser(app, { planType: "prime" });
+    await chat(chatOnly.token, "claude-haiku-5-5").expect(402);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("sends each model to its own provider and bills its real price in rupees", async () => {
+    const { token, user } = await createPlatformUser(app, { idePlan: "ide_299" });
+    const calls = [];
+    global.fetch = jest.fn(async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body), auth: init.headers.authorization });
+      return okStream({ prompt_tokens: 100000, completion_tokens: 10000, prompt_tokens_details: { cached_tokens: 0 } });
+    });
+    const res = await chat(token, "claude-haiku-5-5").expect(200);
+    expect(res.text).toMatch(/Hello/);
+    await chat(token, "gpt-5-nano", { max_tokens: 500 }).expect(200);
+    expect(calls[0]).toMatchObject({ url: "http://anthropic.test/v1/chat/completions", auth: "Bearer test-claude-key" });
+    expect(calls[0].body).toMatchObject({ model: "claude-haiku-5-5", stream_options: { include_usage: true }, max_tokens: 16384 });
+    expect(calls[1]).toMatchObject({ url: "http://openai.test/v1/chat/completions", auth: "Bearer test-openai-key" });
+    expect(calls[1].body.max_completion_tokens).toBe(500);
+    expect(calls[1].body.max_tokens).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 50));
+    // Haiku: 100k in * $0.10 + 10k out * $0.50 = $0.015 -> Rs 1.50 at 100/USD
+    // nano:  100k in * $0.05 + 10k out * $0.40 = $0.009 -> Rs 0.90
+    const w = await IdeWallet.findByPk(user.id);
+    expect(w.subscriptionCredits).toBe(1720000 - 15000 - 9000);
+    const usage = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
+    expect(usage.body.wallet.availableCredits).toBe("169.60");
+  });
+
+  it("answers 402 when the month's budget is used up", async () => {
+    const { token, user } = await createPlatformUser(app, { idePlan: "ide_299" });
+    await wallets.ensureWallet(await require("../src/services/userService").findById(user.id));
     await IdeWallet.update({ subscriptionCredits: 0, topUpCredits: 0 }, { where: { userId: user.id } });
-    const res = await request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model: "ethos-6", messages: [{ role: "user", content: "hi" }] }).expect(402);
+    const res = await chat(token, "ethos-6").expect(402);
     expect(res.body.error.code).toBe("insufficient_credits");
   });
 
-  it("maps upstream 429 to usage_limit_exceeded and unknown models to 400", async () => {
-    const { token } = await createPlatformUser(app);
-    global.fetch = jest.fn(async () => new Response("busy", { status: 429 }));
-    const r = await request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model: "ethos-6", messages: [{ role: "user", content: "hi" }] }).expect(429);
-    expect(r.body.error.code).toBe("usage_limit_exceeded");
-    await request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model: "gpt-9", messages: [{ role: "user", content: "hi" }] }).expect(400);
+  it("limits how many requests one user runs at once on the GPU", async () => {
+    const { token, user } = await createPlatformUser(app, { idePlan: "ide_999" });
+    await kv.set(`inflight:atomesus:${user.id}`, "2", 60);
+    global.fetch = jest.fn();
+    const res = await chat(token, "ethos-6").expect(429);
+    expect(res.body.error.code).toBe("too_many_concurrent_requests");
+    expect(global.fetch).not.toHaveBeenCalled();
+    await kv.del(`inflight:atomesus:${user.id}`);
   });
 
-  it("computes credits with the cached-token discount", () => {
+  it("maps upstream 429 to usage_limit_exceeded and unknown models to 400", async () => {
+    const { token } = await createPlatformUser(app, { idePlan: "ide_299" });
+    global.fetch = jest.fn(async () => new Response("busy", { status: 429 }));
+    const r = await chat(token, "ethos-6").expect(429);
+    expect(r.body.error.code).toBe("usage_limit_exceeded");
+    await chat(token, "gpt-9").expect(400);
+  });
+
+  it("prices cached input at the cache rate and long Haiku prompts at the long-context rate", () => {
     expect(gateway.extractUsage('data: {"usage":{"prompt_tokens":5}}')).toEqual({ prompt_tokens: 5 });
     expect(gateway.extractUsage("data: [DONE]")).toBeNull();
-    const { creditsFor } = require("../src/services/usageService");
-    expect(creditsFor({ promptTokens: 1000, cachedTokens: 0, completionTokens: 0 })).toBe(1);
-    expect(creditsFor({ promptTokens: 1000, cachedTokens: 1000, completionTokens: 0 })).toBe(1); // 0.1 rounded up
+    const haiku = gateway.findModel("claude-haiku-5-5");
+    // 100k cached of 100k input at $0.01/MTok = $0.001 -> Rs 0.10 -> 1000 credits
+    expect(creditsFor({ promptTokens: 100000, cachedTokens: 100000, completionTokens: 0 }, haiku)).toBe(1000);
+    // 200k prompt is over 100k: $0.50/MTok -> $0.10 -> Rs 10
+    expect(creditsFor({ promptTokens: 200000, cachedTokens: 0, completionTokens: 0 }, haiku)).toBe(100000);
   });
 });

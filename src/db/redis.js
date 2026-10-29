@@ -134,6 +134,19 @@ const kv = {
     }
     return n;
   },
+  /** Decrement that never goes below zero; used to release in-flight request slots. */
+  async decr(key) {
+    const r = getRedisClient();
+    if (r) {
+      const n = await r.decr(prefix(key));
+      if (n <= 0) await r.del(prefix(key));
+      return Math.max(0, n);
+    }
+    const n = Math.max(0, (Number(memGet(key)) || 0) - 1);
+    if (n === 0) memory.delete(key);
+    else memory.set(key, { value: String(n), expiresAt: memory.get(key)?.expiresAt || 0 });
+    return n;
+  },
   _memory: memory,
 };
 

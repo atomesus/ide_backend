@@ -1,5 +1,5 @@
 const { Op } = require("sequelize");
-const { ApiKey, User } = require("../models/sql");
+const { ApiKey } = require("../models/sql");
 const { kv } = require("../db/redis");
 const { generateDeviceKey, hashToken } = require("../lib/tokens");
 const { config } = require("../config/env");
@@ -40,7 +40,7 @@ async function resolveDeviceKey(plaintext, { ip } = {}) {
     await kv.setJSON(cacheKey(hash), false, 60);
     return null;
   }
-  const user = await User.findByPk(row.userId);
+  const user = await require("./userService").findById(row.userId);
   if (!user) return null;
   await kv.setJSON(cacheKey(hash), { id: row.id }, CACHE_TTL);
   // Throttle lastUsedAt writes to once a minute.

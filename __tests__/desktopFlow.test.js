@@ -61,7 +61,8 @@ describe("platform session + desktop sign-in", () => {
     const models = await request(app).get("/api/v1/models").set("authorization", `Bearer ${sk}`).expect(200);
     expect(models.body.data[0].id).toBe("ethos-6");
     const usage = await request(app).get("/api/usage").set("authorization", `Bearer ${sk}`).expect(200);
-    expect(usage.body.wallet.availableCredits).toBe("10");
+    expect(usage.body.wallet.availableCredits).toBe("0.00"); // free plan: nothing
+    expect(usage.body.entitlements).toMatchObject({ paid: false, byok: false, hostedModels: false });
     const devices = await request(app).get("/api/account/devices").set("authorization", `Bearer ${sk}`).expect(200);
     expect(devices.body.data.devices).toHaveLength(1);
     // a device key cannot approve further desktop sign-ins
@@ -79,13 +80,24 @@ describe("platform session + desktop sign-in", () => {
     expect(res.body.data.redirectTo).toMatch(/error=access_denied/);
   });
 
-  it("paid plans get the paid allowance and lapsed ones fall back to free", async () => {
-    const paid = await createPlatformUser(app, { planType: "Prime" });
-    const u1 = await request(app).get("/api/usage").set("authorization", `Bearer ${paid.token}`).expect(200);
-    expect(u1.body.limits.plan).toBe("prime");
-    expect(u1.body.limits.monthlyCredits).toBe("5000");
-    const lapsed = await createPlatformUser(app, { planType: "core", planExpiryDate: new Date(Date.now() - 1000) });
-    const u2 = await request(app).get("/api/usage").set("authorization", `Bearer ${lapsed.token}`).expect(200);
-    expect(u2.body.limits.plan).toBe("free");
+  it("each IDE plan gets its rupee budget and BYOK; chat plans and lapsed IDE plans get nothing", async () => {
+    const in299 = await createPlatformUser(app, { idePlan: "ide_299" });
+    const u1 = await request(app).get("/api/usage").set("authorization", `Bearer ${in299.token}`).expect(200);
+    expect(u1.body).toMatchObject({ currency: "INR", limits: { plan: "ide_299", monthlyCredits: "172.00" }, wallet: { availableCredits: "172.00" } });
+    expect(u1.body.entitlements).toMatchObject({ paid: true, byok: true, hostedModels: true });
+    const in999 = await createPlatformUser(app, { idePlan: "ide_999" });
+    expect((await request(app).get("/api/usage").set("authorization", `Bearer ${in999.token}`)).body.limits.monthlyCredits).toBe("576.00");
+    const us4 = await createPlatformUser(app, { idePlan: "ide_299", region: "INTL" });
+    expect((await request(app).get("/api/usage").set("authorization", `Bearer ${us4.token}`)).body.limits).toMatchObject({ plan: "ide_299_intl", monthlyCredits: "220.00" });
+    const us10 = await createPlatformUser(app, { idePlan: "ide_999", region: "INTL" });
+    expect((await request(app).get("/api/usage").set("authorization", `Bearer ${us10.token}`)).body.limits.monthlyCredits).toBe("580.00");
+    const chatPlan = await createPlatformUser(app, { planType: "prime" });
+    const u2 = await request(app).get("/api/usage").set("authorization", `Bearer ${chatPlan.token}`).expect(200);
+    expect(u2.body.entitlements).toMatchObject({ plan: "free", byok: false, hostedModels: false });
+    const lapsed = await createPlatformUser(app, { idePlan: "ide_999", periodEndsInDays: -1 });
+    const u3 = await request(app).get("/api/usage").set("authorization", `Bearer ${lapsed.token}`).expect(200);
+    expect(u3.body.entitlements).toMatchObject({ plan: "free", byok: false, hostedModels: false });
+    const halted = await createPlatformUser(app, { idePlan: "ide_299", status: "halted" });
+    expect((await request(app).get("/api/auth/me").set("authorization", `Bearer ${halted.token}`)).body.data.user.entitlements.paid).toBe(false);
   });
 });
