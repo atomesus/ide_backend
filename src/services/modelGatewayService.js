@@ -115,10 +115,10 @@ async function proxyChatCompletion(req, res) {
   const body = req.body || {};
   const ent = users.entitlements(user);
   if (!ent.paid) {
-    throw new HttpError(402, "Atomesus models need an IDE plan (Rs 299 / Rs 999, or $4 / $10 outside India). Get one at atomesus.com/ide/pricing.", "plan_required");
+    throw new HttpError(402, "Atomesus models need an IDE plan (Rs 299 / Rs 999, or $4 / $10 outside India). Get one at atomesus.com/code.", "plan_required");
   }
   if (!ent.hostedModels) {
-    throw new HttpError(402, "Your IDE plan does not include Atomesus models. Use your own API key, or change plan at atomesus.com/ide/pricing.", "plan_required");
+    throw new HttpError(402, "Your IDE plan does not include Atomesus models. Use your own API key, or change plan at atomesus.com/code.", "plan_required");
   }
   if (listModels().length === 0) throw unavailable("Hosted models are not configured on this server.", "gateway_unconfigured");
   const model = findModel(body.model);
