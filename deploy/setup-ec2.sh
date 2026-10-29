@@ -1,36 +1,52 @@
 #!/usr/bin/env bash
-# One-time setup for a fresh Amazon Linux 2023 EC2 instance that will serve
-# https://ide-api.atomesus.com. Run as ec2-user:  bash setup-ec2.sh you@atomesus.com
-# Needs the DNS record for ide-api.atomesus.com to point at this instance first
-# (for the HTTPS certificate).
+# One-time setup for a fresh EC2 instance (Ubuntu 22.04/24.04 or Amazon Linux 2023)
+# that will serve https://ide-api.atomesus.com. Run as the login user (ubuntu or ec2-user):
+#   bash setup-ec2.sh                      # Node 20, PM2, nginx (HTTP only)
+#   bash setup-ec2.sh you@atomesus.com     # ...plus the HTTPS certificate
+# The certificate step needs the DNS record for the domain to point at this instance.
 set -euo pipefail
-EMAIL="${1:?usage: setup-ec2.sh <email for the HTTPS certificate>}"
+EMAIL="${1:-}"
 DOMAIN="${DOMAIN:-ide-api.atomesus.com}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
-echo "▶ Node 20, nginx, certbot"
-sudo dnf install -y nginx git tar
-curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-sudo dnf install -y nodejs
-sudo npm install -g pm2
-sudo dnf install -y python3-pip
-sudo pip3 install certbot certbot-nginx
-
-echo "▶ nginx site for $DOMAIN"
-sudo cp "$(dirname "$0")/nginx-ide-api.conf" /etc/nginx/conf.d/ide-api.conf
-sudo sed -i "s/ide-api.atomesus.com/$DOMAIN/g" /etc/nginx/conf.d/ide-api.conf
+if command -v apt-get > /dev/null; then
+  echo "▶ Ubuntu: Node 20, nginx, certbot"
+  sudo apt-get update -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg nginx tar
+  if ! node -v 2>/dev/null | grep -q '^v20\.'; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+  fi
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y certbot python3-certbot-nginx
+  SITE=/etc/nginx/sites-available/ide-api
+  sudo cp "$HERE/nginx-ide-api.conf" "$SITE"
+  sudo ln -sfn "$SITE" /etc/nginx/sites-enabled/ide-api
+  sudo rm -f /etc/nginx/sites-enabled/default
+else
+  echo "▶ Amazon Linux: Node 20, nginx, certbot"
+  sudo dnf install -y nginx tar
+  if ! node -v 2>/dev/null | grep -q '^v20\.'; then
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+    sudo dnf install -y nodejs
+  fi
+  sudo dnf install -y python3-pip && sudo pip3 install certbot certbot-nginx
+  SITE=/etc/nginx/conf.d/ide-api.conf
+  sudo cp "$HERE/nginx-ide-api.conf" "$SITE"
+fi
+sudo sed -i "s/ide-api.atomesus.com/$DOMAIN/g" "$SITE"
+command -v pm2 > /dev/null || sudo npm install -g pm2
 sudo nginx -t
 sudo systemctl enable --now nginx
+sudo systemctl reload nginx
 
-echo "▶ HTTPS certificate"
-sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
-echo "0 3 * * * root certbot renew --quiet && systemctl reload nginx" | sudo tee /etc/cron.d/certbot-renew > /dev/null
+if [ -n "$EMAIL" ]; then
+  echo "▶ HTTPS certificate for $DOMAIN"
+  sudo certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
+fi
 
 echo "▶ PM2 on boot"
-mkdir -p /home/ec2-user/releases
-pm2 startup systemd -u ec2-user --hp /home/ec2-user | tail -1 | sudo bash || true
+mkdir -p "$HOME/releases"
+sudo env PATH="$PATH" pm2 startup systemd -u "$USER" --hp "$HOME" > /dev/null
 
-if [ ! -f /home/ec2-user/ide-backend.env ]; then
-  echo "⚠️  Now create /home/ec2-user/ide-backend.env (see deploy/README.md), chmod 600 it,"
-  echo "   then run the 'Deploy IDE backend to EC2' workflow from GitHub Actions."
-fi
+[ -f "$HOME/ide-backend.env" ] || echo "⚠️  Create $HOME/ide-backend.env (chmod 600) before the first deploy (deploy/README.md)."
 echo "✅ Server ready"

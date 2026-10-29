@@ -133,8 +133,11 @@ function loadConfig(env = process.env) {
 function auditConfig(c) {
   const errors = [];
   const warnings = [];
-  if (!c.JWT_SECRET || c.JWT_SECRET.length < 32 || c.JWT_SECRET === "change-me-64-hex") {
+  if (!c.JWT_SECRET || c.JWT_SECRET === "change-me-64-hex") {
     (c.isProd ? errors : warnings).push("JWT_SECRET must be the platform's secret (same value as zero_thought_node) so website sessions verify here");
+  } else if (c.JWT_SECRET.length < 32) {
+    // It has to match the platform, so a short one cannot be fixed here; rotate it there.
+    warnings.push("JWT_SECRET is shorter than 32 characters: session tokens can be forged by guessing it; rotate it on the platform and here together");
   }
   if (!c.MONGO_URI && c.MONGO_REQUIRED) errors.push("MONGO_URI is required (or set MONGO_REQUIRED=false for local dev)");
   if (c.DB_DIALECT !== "sqlite" && !c.DB_HOST) errors.push("DB_HOST is required");

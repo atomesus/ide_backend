@@ -2,8 +2,9 @@ name: Deploy IDE backend to EC2
 
 # Runs on demand, and on every push to main once the repository variable
 # DEPLOY_ENABLED is "true" (Settings → Secrets and variables → Actions → Variables).
-# Needs secrets EC2_HOST and EC2_SSH_KEY; the server is prepared once with
-# deploy/setup-ec2.sh and keeps its .env at /home/ec2-user/ide-backend.env.
+# Needs secrets EC2_HOST and EC2_SSH_KEY, and optionally the variable EC2_USER
+# (default ubuntu). The server is prepared once with deploy/setup-ec2.sh and keeps
+# its .env at ~/ide-backend.env of that user.
 on:
   workflow_dispatch:
   push:
@@ -41,33 +42,34 @@ jobs:
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          username: ${{ vars.EC2_USER || 'ubuntu' }}
           key: ${{ secrets.EC2_SSH_KEY }}
           source: ide-backend.tgz
-          target: /home/ec2-user/releases
+          target: releases
 
       - name: Install, migrate and reload with PM2
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          username: ${{ vars.EC2_USER || 'ubuntu' }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -euo pipefail
-            if [ ! -f /home/ec2-user/ide-backend.env ]; then
-              echo "❌ /home/ec2-user/ide-backend.env not found (see deploy/README.md)"; exit 1
+            if [ ! -f "$HOME/ide-backend.env" ]; then
+              echo "❌ $HOME/ide-backend.env not found (see deploy/README.md)"; exit 1
             fi
-            release=/home/ec2-user/releases/${{ github.sha }}
+            release="$HOME/releases/${{ github.sha }}"
             mkdir -p "$release"
-            tar xzf /home/ec2-user/releases/ide-backend.tgz -C "$release"
-            rm -f /home/ec2-user/releases/ide-backend.tgz
-            cp /home/ec2-user/ide-backend.env "$release/.env"
+            tar xzf "$HOME/releases/ide-backend.tgz" -C "$release"
+            rm -f "$HOME/releases/ide-backend.tgz"
+            cp "$HOME/ide-backend.env" "$release/.env"
+            chmod 600 "$release/.env"
             cd "$release"
             npm ci --omit=dev
             npm run env:check
             npm run db:sync
-            ln -sfn "$release" /home/ec2-user/ide-backend
-            cd /home/ec2-user/ide-backend
+            ln -sfn "$release" "$HOME/ide-backend"
+            cd "$HOME/ide-backend"
             if pm2 describe ide-backend > /dev/null 2>&1; then
               pm2 reload ecosystem.config.js --env production --update-env
             else
@@ -81,5 +83,5 @@ jobs:
             curl -fsS http://127.0.0.1:4100/health/ready
             grep -q "${{ github.sha }}" deployment-commit.txt
             # keep the five newest releases
-            ls -1dt /home/ec2-user/releases/*/ | tail -n +6 | xargs -r rm -rf
+            ls -1dt "$HOME"/releases/*/ | tail -n +6 | xargs -r rm -rf
             echo "✅ Deployed ${{ github.sha }}"

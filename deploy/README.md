@@ -6,8 +6,8 @@ reach the same RDS MySQL, Mongo and ElastiCache Redis.
 
 ## 1. AWS (once)
 
-- **Instance:** Amazon Linux 2023, `t3.small` or larger, same VPC as the platform's RDS and
-  ElastiCache. Login user `ec2-user`.
+- **Instance:** Ubuntu 22.04/24.04 (login `ubuntu`) or Amazon Linux 2023 (login `ec2-user`),
+  `t3.small` or larger, in a public subnet of the same VPC as the platform's RDS and ElastiCache.
 - **Instance security group:** inbound 22 (from your IP and GitHub Actions), 80 and 443 (anywhere).
 - **RDS security group:** allow inbound 3306 from the instance's security group.
 - **ElastiCache security group:** allow inbound 6379 from the instance's security group.
@@ -19,13 +19,14 @@ reach the same RDS MySQL, Mongo and ElastiCache Redis.
 Copy `deploy/` to the instance and run:
 
 ```bash
-bash deploy/setup-ec2.sh team@atomesus.com
+bash deploy/setup-ec2.sh                     # before DNS points here: HTTP only
+bash deploy/setup-ec2.sh team@atomesus.com   # once DNS points here: adds HTTPS
 ```
 
-It installs Node 20, PM2, nginx and certbot, gets the HTTPS certificate and makes PM2
-start on boot.
+It installs Node 20, PM2, nginx and certbot, optionally gets the HTTPS certificate, and makes
+PM2 start on boot.
 
-Then create `/home/ec2-user/ide-backend.env` (`chmod 600`). Start from `.env.example` and take
+Then create `~/ide-backend.env` of the login user (`chmod 600`). Start from `.env.example` and take
 the `[shared]` values from the platform's production `.env`:
 
 | Key | Value |
@@ -52,20 +53,21 @@ the `[shared]` values from the platform's production `.env`:
 In `atomesus/ide_backend` → Settings → Secrets and variables → Actions:
 
 - Secret `EC2_HOST`: the Elastic IP or `ide-api.atomesus.com`.
-- Secret `EC2_SSH_KEY`: the private key for `ec2-user`.
+- Secret `EC2_SSH_KEY`: the private key of the login user.
+- Variable `EC2_USER`: `ubuntu` (default) or `ec2-user`.
 - Variable `DEPLOY_ENABLED` = `true` to deploy on every push to `main` (leave unset to deploy
   only from the Actions tab).
 
 ## 4. Deploy
 
 Actions → **Deploy IDE backend to EC2** → Run workflow. It runs the tests, uploads the app to
-`/home/ec2-user/releases/<commit>`, installs production dependencies, checks the env, creates
+`~/releases/<commit>`, installs production dependencies, checks the env, creates
 the `ide_api_keys` and `ide_wallets` tables if missing (`Users` is never touched), switches
-`/home/ec2-user/ide-backend` to the new release, reloads PM2 and waits for
+`~/ide-backend` to the new release, reloads PM2 and waits for
 `/health/ready`. The five newest releases are kept for rollback:
 
 ```bash
-ln -sfn /home/ec2-user/releases/<older-commit> /home/ec2-user/ide-backend && cd /home/ec2-user/ide-backend && pm2 reload ecosystem.config.js --env production
+ln -sfn ~/releases/<older-commit> ~/ide-backend && cd ~/ide-backend && pm2 reload ecosystem.config.js --env production
 ```
 
 ## 5. Check
