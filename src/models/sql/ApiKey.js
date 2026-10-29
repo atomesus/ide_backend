@@ -3,7 +3,8 @@ const { sequelize } = require("../../db/sql");
 
 /**
  * Device keys (`sk_...`) issued to IDE installs after a desktop sign-in.
- * Only the SHA-256 of the key is stored.
+ * Only the SHA-256 of the key is stored. Owned by this service (ide_* table
+ * inside the platform database); `userId` points at platform `Users.id`.
  */
 const ApiKey = sequelize.define(
   "ApiKey",
@@ -22,7 +23,7 @@ const ApiKey = sequelize.define(
     expiresAt: { type: DataTypes.DATE, allowNull: false },
     revokedAt: { type: DataTypes.DATE, allowNull: true },
   },
-  { tableName: "api_keys", timestamps: true, indexes: [{ fields: ["userId"] }, { fields: ["expiresAt"] }] }
+  { tableName: "ide_api_keys", timestamps: true, indexes: [{ fields: ["userId"] }, { fields: ["expiresAt"] }] }
 );
 
 module.exports = ApiKey;

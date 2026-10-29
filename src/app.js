@@ -4,7 +4,6 @@ const helmet = require("helmet");
 const cors = require("cors");
 const compression = require("compression");
 const morgan = require("morgan");
-const cookieParser = require("cookie-parser");
 const { config } = require("./config/env");
 const { resolveTrustProxy } = require("./middleware/clientIp");
 const { notFoundHandler, errorHandler } = require("./middleware/errorHandler");
@@ -40,7 +39,6 @@ function createApp() {
   });
   app.use(cors({ origin: corsOrigin, credentials: true, methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Health-Token", "X-Atomesus-Platform"], maxAge: 600 }));
   app.use(compression({ filter: (req, res) => !String(res.getHeader("Content-Type") || "").includes("text/event-stream") && compression.filter(req, res) }));
-  app.use(cookieParser());
   app.use(express.json({ limit: "1mb" }));
 
   if (!config.isTest) {

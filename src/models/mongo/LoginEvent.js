@@ -4,7 +4,7 @@ const { mongoose } = require("../../db/mongo");
 const LoginEventSchema = new mongoose.Schema(
   {
     userId: { type: String, required: true, index: true },
-    method: { type: String, required: true, enum: ["password", "otp", "google", "github", "device_key"] },
+    method: { type: String, required: true, enum: ["website", "device_key", "password", "otp", "google", "github"] },
     client: { type: String, required: true, enum: ["web", "desktop", "api"] },
     outcome: { type: String, required: true, enum: ["success", "failure"], default: "success" },
     ip: String,

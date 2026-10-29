@@ -86,7 +86,7 @@ async function proxyChatCompletion(req, res) {
   if (!model) throw badRequest(`Unknown model "${body.model}". Call /api/v1/models for the list.`, "unknown_model");
   if (!Array.isArray(body.messages) || body.messages.length === 0) throw badRequest("messages is required.", "invalid_request");
 
-  if (usage.available(user) <= 0) {
+  if ((await usage.availableFor(user)) <= 0) {
     throw new HttpError(402, "You are out of credits. Top up or upgrade your plan at atomesus.com.", "insufficient_credits");
   }
 

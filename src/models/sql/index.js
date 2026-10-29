@@ -1,7 +1,8 @@
 const User = require("./User");
 const ApiKey = require("./ApiKey");
+const IdeWallet = require("./IdeWallet");
 
-User.hasMany(ApiKey, { foreignKey: "userId", as: "apiKeys", onDelete: "CASCADE" });
-ApiKey.belongsTo(User, { foreignKey: "userId", as: "user" });
+/** Tables this service creates and migrates. `User` is the platform's and is never synced. */
+const IDE_OWNED_MODELS = [ApiKey, IdeWallet];
 
-module.exports = { User, ApiKey };
+module.exports = { User, ApiKey, IdeWallet, IDE_OWNED_MODELS };

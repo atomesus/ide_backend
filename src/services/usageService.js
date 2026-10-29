@@ -1,8 +1,8 @@
 const { isMongoReady } = require("../db/mongo");
 const { UsageEvent } = require("../models/mongo");
-const { User } = require("../models/sql");
 const { config } = require("../config/env");
-const users = require("./userService");
+const wallets = require("./walletService");
+const { planOf, monthlyCreditsFor } = require("./userService");
 const logger = require("../lib/logger");
 
 /** Credits for a usage record: tokens/1000 * multiplier, rounded up per side. */
@@ -13,27 +13,15 @@ function creditsFor({ promptTokens = 0, cachedTokens = 0, completionTokens = 0 }
   return Math.ceil((billableInput / 1000) * inMul + (completionTokens / 1000) * outMul);
 }
 
-function available(user) {
-  return (user.subscriptionCredits || 0) + (user.topUpCredits || 0);
-}
-
-/** Subscription credits are spent first, then top-ups. Atomic decrement in SQL. */
-async function deductCredits(user, credits) {
-  if (credits <= 0) return;
-  const fromSub = Math.min(user.subscriptionCredits || 0, credits);
-  const fromTop = Math.min(user.topUpCredits || 0, credits - fromSub);
-  await User.update(
-    { subscriptionCredits: Math.max(0, (user.subscriptionCredits || 0) - fromSub), topUpCredits: Math.max(0, (user.topUpCredits || 0) - fromTop) },
-    { where: { id: user.id } }
-  );
-  user.subscriptionCredits -= fromSub;
-  user.topUpCredits -= fromTop;
+/** Credits the user can still spend right now. */
+async function availableFor(user) {
+  return wallets.available(await wallets.ensureWallet(user));
 }
 
 async function recordUsage(user, event) {
   const credits = creditsFor(event, event.modelMeta);
   try {
-    await deductCredits(user, credits);
+    await wallets.deduct(await wallets.ensureWallet(user), credits);
   } catch (err) {
     logger.error("credit deduction failed", { userId: user.id, error: err.message });
   }
@@ -61,19 +49,20 @@ async function sumCredits(userId, since) {
 
 /** GET /api/usage payload in the shape the IDE parses (common/orbitProviderUsage.ts). */
 async function usageSummary(user) {
-  await users.ensureBillingPeriod(user);
-  const periodStart = user.billingPeriodStart ? new Date(user.billingPeriodStart) : new Date();
+  const wallet = await wallets.ensureWallet(user);
+  const periodStart = wallet.billingPeriodStart ? new Date(wallet.billingPeriodStart) : new Date();
   const [period, last30] = await Promise.all([sumCredits(user.id, periodStart), sumCredits(user.id, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))]);
+  const plan = planOf(user);
   return {
     wallet: {
-      availableCredits: String(available(user)),
-      subscriptionCredits: String(user.subscriptionCredits || 0),
-      topUpCredits: String(user.topUpCredits || 0),
+      availableCredits: String(wallets.available(wallet)),
+      subscriptionCredits: String(wallet.subscriptionCredits || 0),
+      topUpCredits: String(wallet.topUpCredits || 0),
     },
-    limits: { plan: user.plan || "free", monthlyCredits: String(users.monthlyCreditsFor(user.plan)) },
+    limits: { plan, monthlyCredits: String(monthlyCreditsFor(plan)) },
     billingPeriod: period == null ? null : { start: periodStart.toISOString(), totalCreditsDeducted: period },
     last30Days: { totalCreditsDeducted: last30 ?? 0 },
   };
 }
 
-module.exports = { creditsFor, available, deductCredits, recordUsage, usageSummary };
+module.exports = { creditsFor, availableFor, recordUsage, usageSummary };

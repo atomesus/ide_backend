@@ -1,8 +1,7 @@
-const { verifySessionToken, isDeviceKey } = require("../lib/tokens");
+const { verifyPlatformToken, isDeviceKey } = require("../lib/tokens");
 const { resolveDeviceKey } = require("../services/apiKeyService");
 const { findById } = require("../services/userService");
 const { unauthorized } = require("../lib/errors");
-const { config } = require("../config/env");
 const { getClientIp } = require("./clientIp");
 
 function readBearer(req) {
@@ -14,28 +13,23 @@ function readBearer(req) {
   return null;
 }
 
-function readSessionCookie(req) {
-  const token = req.cookies?.[config.SESSION_COOKIE_NAME];
-  return token && token !== "null" ? token : null;
-}
-
 /**
  * Resolves the caller from either a device key (`sk_...`, issued to IDE
- * installs) or a session JWT (website / API). Sets req.user, req.auth.
+ * installs) or the platform session JWT the website holds (`auth_token`).
+ * Sets req.user (platform Users row) and req.auth.
  */
 async function resolveRequestUser(req) {
   const bearer = readBearer(req);
-  if (bearer && isDeviceKey(bearer)) {
+  if (!bearer) return null;
+  if (isDeviceKey(bearer)) {
     const resolved = await resolveDeviceKey(bearer, { ip: getClientIp(req) });
     if (!resolved) return null;
     return { user: resolved.user, auth: { kind: "device_key", apiKeyId: resolved.apiKey.id, token: bearer } };
   }
-  const token = bearer || readSessionCookie(req);
-  if (!token) return null;
-  const decoded = verifySessionToken(token); // throws on invalid/expired
-  const user = await findById(decoded.sub);
+  const decoded = verifyPlatformToken(bearer); // throws on invalid/expired/non-user
+  const user = await findById(decoded.id);
   if (!user) return null;
-  return { user, auth: { kind: "session", token } };
+  return { user, auth: { kind: "platform_session", token: bearer } };
 }
 
 /** strict=true rejects anonymous callers; strict=false just sets req.user = null. */
@@ -58,16 +52,12 @@ function requireAuth(strict = true) {
         req.auth = null;
         return next();
       }
+      if (err.name === "TokenExpiredError" || err.name === "JsonWebTokenError" || err.code === "INVALID_TOKEN") {
+        return next(unauthorized("Your session has expired. Sign in again.", "invalid_token"));
+      }
       next(err);
     }
   };
 }
 
-function requireRole(role) {
-  return (req, res, next) => {
-    if (!req.user || req.user.role !== role) return next(unauthorized("Forbidden", "forbidden"));
-    next();
-  };
-}
-
-module.exports = { requireAuth, requireRole, resolveRequestUser, readBearer };
+module.exports = { requireAuth, resolveRequestUser, readBearer };

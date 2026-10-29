@@ -1,6 +1,7 @@
-const { bootTestApp, shutdownTestApp, signupUser, request } = require("./helpers");
+const { bootTestApp, shutdownTestApp, createPlatformUser, request } = require("./helpers");
 const gateway = require("../src/services/modelGatewayService");
-const { User } = require("../src/models/sql");
+const { IdeWallet } = require("../src/models/sql");
+const wallets = require("../src/services/walletService");
 
 let app;
 beforeAll(async () => { app = await bootTestApp(); });
@@ -21,7 +22,7 @@ function sse(lines) {
 
 describe("model gateway", () => {
   it("streams SSE through and bills credits from the usage chunk", async () => {
-    const { token } = await signupUser(app);
+    const { token } = await createPlatformUser(app);
     let captured;
     global.fetch = jest.fn(async (url, init) => {
       captured = { url, body: JSON.parse(init.body), headers: init.headers };
@@ -44,14 +45,15 @@ describe("model gateway", () => {
   });
 
   it("answers 402 with insufficient_credits when the wallet is empty", async () => {
-    const { token, user } = await signupUser(app);
-    await User.update({ subscriptionCredits: 0, topUpCredits: 0 }, { where: { id: user.id } });
+    const { token, user } = await createPlatformUser(app);
+    await wallets.ensureWallet(user);
+    await IdeWallet.update({ subscriptionCredits: 0, topUpCredits: 0 }, { where: { userId: user.id } });
     const res = await request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model: "ethos-6", messages: [{ role: "user", content: "hi" }] }).expect(402);
     expect(res.body.error.code).toBe("insufficient_credits");
   });
 
   it("maps upstream 429 to usage_limit_exceeded and unknown models to 400", async () => {
-    const { token } = await signupUser(app);
+    const { token } = await createPlatformUser(app);
     global.fetch = jest.fn(async () => new Response("busy", { status: 429 }));
     const r = await request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model: "ethos-6", messages: [{ role: "user", content: "hi" }] }).expect(429);
     expect(r.body.error.code).toBe("usage_limit_exceeded");

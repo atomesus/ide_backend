@@ -7,24 +7,16 @@ const apiKeys = require("../services/apiKeyService");
 const { listLogins } = require("../services/loginEventService");
 const { isMongoReady } = require("../db/mongo");
 const { UserSettings, LoginEvent, UsageEvent } = require("../models/mongo");
-const { User } = require("../models/sql");
-const { config } = require("../config/env");
+const { IdeWallet } = require("../models/sql");
 const { unavailable } = require("../lib/errors");
-const { verifyPassword } = require("../lib/password");
-const { unauthorized } = require("../lib/errors");
 
 const router = express.Router();
 const ok = (res, data, message = "OK", status = 200) => res.status(status).json({ success: true, code: status, message, data });
 
 router.use(requireAuth(true));
 
+// Profile is owned by the platform (PUT /api/updateProfile there); read-only here.
 router.get("/profile", async (req, res) => ok(res, { user: users.safeUser(req.user) }));
-
-router.patch("/profile", validate({ body: z.object({ name: z.string().trim().min(1).max(120).optional(), country: z.string().trim().length(2).toUpperCase().optional(), image: z.string().url().max(1024).nullable().optional() }) }), async (req, res) => {
-  for (const [k, v] of Object.entries(req.body)) req.user[k] = v;
-  await req.user.save();
-  ok(res, { user: users.safeUser(req.user) }, "Profile updated");
-});
 
 // ---- devices (IDE installs = device keys) ---------------------------------
 router.get("/devices", async (req, res) => ok(res, { devices: await apiKeys.listKeys(req.user.id), currentApiKeyId: req.auth.apiKeyId || null }));
@@ -64,20 +56,16 @@ router.put("/settings", express.json({ limit: "1mb" }), validate({ body: setting
   ok(res, { version: doc.version, updatedAt: doc.updatedAt }, "Settings saved");
 });
 
-// ---- delete account (GDPR-style: SQL soft-delete + purge Mongo records) ---
-router.delete("/", validate({ body: z.object({ password: z.string().max(128).optional(), confirm: z.literal("DELETE") }) }), async (req, res) => {
-  const user = req.user;
-  if (user.passwordHash && !(await verifyPassword(req.body.password || "", user.passwordHash))) throw unauthorized("Password is incorrect.", "invalid_credentials");
-  await apiKeys.revokeAllForUser(user.id);
+// ---- purge everything the IDE keeps about this account --------------------
+// The account itself is deleted on the platform (POST /api/auth/delete-account there).
+router.delete("/ide-data", validate({ body: z.object({ confirm: z.literal("DELETE") }) }), async (req, res) => {
+  const userId = req.user.id;
+  await apiKeys.revokeAllForUser(userId);
+  await IdeWallet.destroy({ where: { userId } });
   if (isMongoReady()) {
-    await Promise.all([UserSettings.deleteMany({ userId: user.id }), LoginEvent.deleteMany({ userId: user.id }), UsageEvent.deleteMany({ userId: user.id })]);
+    await Promise.all([UserSettings.deleteMany({ userId }), LoginEvent.deleteMany({ userId }), UsageEvent.deleteMany({ userId })]);
   }
-  // Keep the row (paranoid delete) but scrub identity so the email can be reused.
-  const tombstone = `deleted+${user.id}@deleted.invalid`;
-  await User.update({ email: tombstone, name: "Deleted user", image: null, passwordHash: null, googleId: null, githubId: null, githubLogin: null }, { where: { id: user.id } });
-  await user.destroy();
-  res.clearCookie(config.SESSION_COOKIE_NAME, { path: "/" });
-  ok(res, null, "Account deleted");
+  ok(res, null, "IDE data deleted");
 });
 
 module.exports = router;

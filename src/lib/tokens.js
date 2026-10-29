@@ -7,36 +7,26 @@ function requireSecret() {
   return config.JWT_SECRET;
 }
 
-/** Web/API session JWT for a platform user. */
-function signSessionToken(user, extra = {}) {
-  return jwt.sign({ sub: user.id, email: user.email, role: user.role || "user", typ: "session", ...extra }, requireSecret(), {
-    expiresIn: config.JWT_TTL,
-  });
-}
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function verifySessionToken(token) {
-  const decoded = jwt.verify(token, requireSecret());
-  if (!decoded || decoded.typ !== "session" || !decoded.sub) {
-    const err = new Error("Invalid session token");
+/**
+ * Verifies a session token issued by the Atomesus platform (zero_thought_node
+ * `createToken`: `{ id, email }` signed HS256 with the shared JWT_SECRET, 30d).
+ * Admin tokens (Mongo ObjectId ids) and password-reset tokens (no id) are refused.
+ */
+function verifyPlatformToken(token) {
+  const decoded = jwt.verify(token, requireSecret(), { algorithms: ["HS256"] });
+  if (!decoded || typeof decoded !== "object" || !UUID_RE.test(String(decoded.id || ""))) {
+    const err = new Error("Not a platform user session");
     err.code = "INVALID_TOKEN";
     throw err;
   }
   return decoded;
 }
 
-/** Purpose-bound short-lived tokens (password reset, email verification). */
-function signPurposeToken(purpose, payload, ttl) {
-  return jwt.sign({ ...payload, typ: purpose }, requireSecret(), { expiresIn: ttl });
-}
-
-function verifyPurposeToken(purpose, token) {
-  const decoded = jwt.verify(token, requireSecret());
-  if (!decoded || decoded.typ !== purpose) {
-    const err = new Error("Invalid token");
-    err.code = "INVALID_TOKEN";
-    throw err;
-  }
-  return decoded;
+/** Same shape the platform signs; used by tests and local tooling only. */
+function signPlatformToken(user, expiresIn = "30d") {
+  return jwt.sign({ id: user.id, email: user.email }, requireSecret(), { expiresIn });
 }
 
 /** Device keys handed to the IDE: `sk_` + 43 url-safe chars. Only the hash is stored. */
@@ -58,19 +48,4 @@ function randomId(bytes = 24) {
   return crypto.randomBytes(bytes).toString("base64url");
 }
 
-function generateOtp() {
-  return crypto.randomInt(100000, 1000000).toString();
-}
-
-module.exports = {
-  signSessionToken,
-  verifySessionToken,
-  signPurposeToken,
-  verifyPurposeToken,
-  generateDeviceKey,
-  isDeviceKey,
-  hashToken,
-  randomId,
-  generateOtp,
-  DEVICE_KEY_PREFIX,
-};
+module.exports = { verifyPlatformToken, signPlatformToken, generateDeviceKey, isDeviceKey, hashToken, randomId, DEVICE_KEY_PREFIX, UUID_RE };

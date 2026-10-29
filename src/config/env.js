@@ -2,6 +2,10 @@
  * Loads .env once and validates the variables the service relies on.
  * Everything downstream imports `config` from here instead of reading
  * process.env ad hoc, so a typo in .env fails at boot, not at 3am.
+ *
+ * Accounts live in the Atomesus platform database (zero_thought_node); this
+ * service reads that `Users` table and trusts the platform's JWT, so DB_* and
+ * JWT_SECRET must be the platform's values.
  */
 const path = require("path");
 const { z } = require("zod");
@@ -40,15 +44,15 @@ const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: int(4100),
   API_PUBLIC_URL: str("http://localhost:4100"),
+  // The website (atomesis_frontend) that hosts /desktop/login and the account pages.
   WEB_APP_URL: str("http://localhost:3000"),
   TRUST_PROXY_HOPS: str(""),
   CORS_ALLOWED_ORIGINS: list(),
   HEALTH_TOKEN: str(""),
   LOG_LEVEL: str("info"),
 
+  // Shared with zero_thought_node: verifies the platform's { id, email } session tokens.
   JWT_SECRET: str(""),
-  JWT_TTL: str("30d"),
-  SESSION_COOKIE_NAME: str("atomesus_session"),
 
   MONGO_URI: str(""),
   MONGO_DB_NAME: str("atomesus_ide"),
@@ -57,12 +61,13 @@ const schema = z.object({
   MONGO_POOL_MAX: int(50),
   DNS_SERVERS: list(),
 
+  // The platform database. `Users` is read here; ide_* tables are owned here.
   DB_DIALECT: z.enum(["mysql", "mariadb", "sqlite"]).default("mysql"),
   DB_HOST: str("127.0.0.1"),
   DB_PORT: int(3306),
   DB_USER: str("root"),
   DB_PASS: str(""),
-  DB_NAME: str("atomesus_ide"),
+  DB_NAME: str("atomesusdb"),
   DB_POOL_MIN: int(5),
   DB_POOL_MAX: int(20),
   DB_SYNC: bool(true),
@@ -77,39 +82,14 @@ const schema = z.object({
   REDIS_REQUIRED: bool(false),
   REDIS_KEY_PREFIX: str("ide:"),
 
-  GITHUB_CLIENT_ID: str(""),
-  GITHUB_CLIENT_SECRET: str(""),
-  GOOGLE_CLIENT_ID: str(""),
-  GOOGLE_CLIENT_SECRET: str(""),
   DESKTOP_REDIRECT_SCHEMES: list(),
   DEVICE_KEY_TTL_DAYS: int(30),
-  DESKTOP_FLOW_TTL_SEC: int(600),
   AUTH_CODE_TTL_SEC: int(300),
-  OTP_TTL_SEC: int(600),
-  PASSWORD_RESET_TOKEN_TTL: str("15m"),
-  DISPOSABLE_EMAIL_BLOCK: str(""),
 
-  SIGNUP_OTP_EMAIL_MAX_PER_15MIN: int(3),
-  SIGNUP_OTP_IP_MAX_PER_15MIN: int(5),
-  SIGNUP_OTP_IP_MAX_PER_HOUR: int(10),
-  SIGNUP_VERIFY_EMAIL_MAX_PER_15MIN: int(5),
-  SIGNUP_VERIFY_IP_MAX_PER_15MIN: int(10),
-  SIGNUP_VERIFY_IP_MAX_PER_HOUR: int(15),
-  LOGIN_EMAIL_MAX_PER_15MIN: int(10),
+  DESKTOP_APPROVE_USER_MAX_PER_15MIN: int(20),
   LOGIN_IP_MAX_PER_15MIN: int(20),
   PROVIDER_RELAY_IP_MAX_PER_15MIN: int(60),
   CHAT_IP_MAX_PER_MIN: int(120),
-
-  AWS_REGION: str(""),
-  AWS_ACCESS_KEY_ID: str(""),
-  AWS_SECRET_ACCESS_KEY: str(""),
-  SES_REGION: str(""),
-  EMAIL_HOST: str(""),
-  EMAIL_PORT: int(465),
-  EMAIL_USER: str(""),
-  EMAIL_PASS: str(""),
-  FROM_EMAIL: str("noreply@atomesus.com"),
-  EMAIL_FROM_NAME: str("Atomesus"),
 
   PROVIDER_RELAY_ENABLED: bool(true),
   OPENAI_CODEX_CLIENT_ID: str(""),
@@ -154,16 +134,16 @@ function auditConfig(c) {
   const errors = [];
   const warnings = [];
   if (!c.JWT_SECRET || c.JWT_SECRET.length < 32 || c.JWT_SECRET === "change-me-64-hex") {
-    (c.isProd ? errors : warnings).push("JWT_SECRET must be a random string of at least 32 chars (openssl rand -hex 32)");
+    (c.isProd ? errors : warnings).push("JWT_SECRET must be the platform's secret (same value as zero_thought_node) so website sessions verify here");
   }
   if (!c.MONGO_URI && c.MONGO_REQUIRED) errors.push("MONGO_URI is required (or set MONGO_REQUIRED=false for local dev)");
   if (c.DB_DIALECT !== "sqlite" && !c.DB_HOST) errors.push("DB_HOST is required");
-  if (c.isProd && !c.REDIS_URL && !c.REDIS_HOST) warnings.push("Redis not configured: rate limits and OTPs are per-process only");
+  if (c.DB_DIALECT !== "sqlite" && !c.DB_NAME) errors.push("DB_NAME must be the platform database that holds the Users table");
+  if (c.isProd && !c.REDIS_URL && !c.REDIS_HOST) warnings.push("Redis not configured: rate limits and sign-in codes are per-process only");
   if (c.isProd && c.REDIS_REQUIRED === false) warnings.push("REDIS_REQUIRED=false in production; multi-instance deployments need Redis");
-  if (!c.GITHUB_CLIENT_ID || !c.GITHUB_CLIENT_SECRET) warnings.push("GitHub sign-in disabled: GITHUB_CLIENT_ID/SECRET unset");
-  if (!c.GOOGLE_CLIENT_ID) warnings.push("Google sign-in disabled: GOOGLE_CLIENT_ID unset");
   if (!c.ATOMESUS_BASE_URL) warnings.push("ATOMESUS_BASE_URL unset: /api/v1/chat/completions will answer 503");
   if (c.isProd && !c.API_PUBLIC_URL.startsWith("https://")) errors.push("API_PUBLIC_URL must be https in production");
+  if (c.isProd && !c.WEB_APP_URL.startsWith("https://")) errors.push("WEB_APP_URL must be the https website that hosts /desktop/login");
   return { errors, warnings };
 }
 

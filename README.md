@@ -1,54 +1,63 @@
 # Atomesus IDE backend
 
-Account, device-key and hosted-model backend for the Atomesus IDE
-(`../atomesus-ide`). Node 20 · Express 5 · MongoDB · Redis · MySQL/MariaDB.
+Device-key and hosted-model backend for the Atomesus IDE (`../atomesus-ide`).
+Node 20 · Express 5 · MongoDB · Redis · MySQL/MariaDB.
+
+**Accounts are the Atomesus platform's.** This service does not sign users up or in itself: it
+reads the platform's `Users` table (zero_thought_node, same database) and trusts the platform's
+session JWT, so an IDE user is exactly a website user. The sign-in page lives on the website
+(`atomesis_frontend` `/desktop/login`); this server only hands out the one-time code, the device
+key and the hosted-model gateway.
 
 Two kinds of sign-in, deliberately different:
 
 | Sign-in | Where it runs | What is stored |
 |---|---|---|
-| **Atomesus account** (email + OTP, password, GitHub, Google) | here, via `/desktop/*` pages and `/api/auth/*` | user row (SQL), device keys (SQL), login history, IDE settings, usage (Mongo) |
-| **Bring your own subscription** (ChatGPT/Codex, Claude, SuperGrok, Cline) | in the IDE against the provider's OAuth; this server only relays the token exchange at `/api/provider-auth/*` | **nothing** — no user row, no token, no log line with a secret |
+| **Atomesus account** (the website's login: email + password, Google, OTP sign-up) | website → `POST /api/auth/desktop/approve` here | device keys + IDE wallet (`ide_*` SQL tables), login history, IDE settings, usage (Mongo) |
+| **Bring your own subscription** (ChatGPT/Codex, Claude, SuperGrok, Cline) | in the IDE against the provider's OAuth; this server only relays the token exchange at `/api/provider-auth/*` | **nothing** — no row, no token, no log line with a secret |
 
 ## Run it locally
 
 ```bash
 nvm use                     # Node 20.18.2 (.nvmrc)
 npm install
-cp .env.example .env        # then edit; or pull shared values from zero_thought_node:
-npm run env:import -- ../zero_thought_node/.env --dry-run
+cp .env.example .env        # then pull the platform's values (DB_*, JWT_SECRET, MONGO_URI, REDIS_*):
+npm run env:import -- ../zero_thought_node/.env
 npm run env:check           # validates .env, prints what is on/off
 npm run dev                 # nodemon on http://localhost:4100
 npm test                    # Jest (SQLite in-memory, local Mongo if reachable, no Redis needed)
 ```
 
-Local services on this Mac: MongoDB (`brew services`), MariaDB (`brew services`), Redis
-(`redis-server --daemonize yes`). Create the SQL database once:
+`DB_NAME` must be the platform database (the one with the `Users` table). Outside production the
+`ide_api_keys` and `ide_wallets` tables are created on boot; in production run `npm run db:sync`
+once (`-- --alter` after model changes). `Users` is never created, altered or written here.
+
+For a fully local stack use a local copy of the platform database and run the platform backend
+against it too, e.g. on this Mac (`atomesus_qa_local` has a `Users` table):
 
 ```sql
-CREATE DATABASE atomesus_ide CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'atomesus_ide'@'127.0.0.1' IDENTIFIED BY '...';
-GRANT ALL ON atomesus_ide.* TO 'atomesus_ide'@'127.0.0.1';
+GRANT ALL ON atomesus_qa_local.* TO 'atomesus_ide'@'127.0.0.1';
+GRANT ALL ON atomesus_qa_local.* TO 'atomesus_ide'@'localhost';
 ```
 
-Outside production the schema is synced on boot; in production run `npm run db:sync` once
-(or `-- --alter` after model changes).
-
-Point a dev build of the IDE at it with `ORBIT_API_URL=http://localhost:4100` (or set
-`orbitApiUrl` in `product.json` for a packaged build).
+Then `scripts/dev-platform-local.sh` (runs `../zero_thought_node` on :4000 against this `.env`'s database with local Mongo/Redis; its own `.env` is left untouched),
+`../atomesis_frontend` on :3000 (`NEXT_PUBLIC_API_ORIGIN=http://localhost:4000`,
+`NEXT_PUBLIC_IDE_API_ORIGIN=http://localhost:4100`), this server on :4100
+(`WEB_APP_URL=http://localhost:3000`), and a dev IDE with `ORBIT_API_URL=http://localhost:4100`
+(or `orbitApiUrl` in `product.json` for a packaged build).
 
 ## Environment
 
 Everything is read once by `src/config/env.js` and validated with zod; a bad value fails at
-boot. `.env.example` documents each key. Keys marked `[shared]` have the same names as
-`zero_thought_node/.env` (`MONGO_URI`, `DB_*`, `REDIS_*`, `JWT_SECRET`, `GOOGLE_CLIENT_*`,
-SES/SMTP, `ATOMESUS_BASE_URL`, rate limits…) so `npm run env:import` can copy them. It only
+boot. `.env.example` documents each key. Keys marked `[shared]` have the same names **and must
+hold the same values** as `zero_thought_node/.env` (`DB_*` including `DB_NAME`, `JWT_SECRET`,
+`MONGO_URI`, `REDIS_*`, `ATOMESUS_BASE_URL`…) so `npm run env:import` can copy them. It only
 copies allow-listed keys, never prints values, never overwrites a value already set (use
-`--overwrite`), and deliberately skips `DB_NAME` and `PORT` — this service owns its own schema.
+`--overwrite`), and skips `PORT` and `MONGO_DB_NAME` (this service keeps its own Mongo database).
 
-Production hard requirements (`auditConfig`): random `JWT_SECRET`, `MONGO_URI`, SQL host,
-`API_PUBLIC_URL` on https. Redis is optional (single-instance mode falls back to in-process
-state) but required for PM2 cluster / multi-instance deployments.
+Production hard requirements (`auditConfig`): the platform's `JWT_SECRET`, `MONGO_URI`, SQL
+host and `DB_NAME`, `API_PUBLIC_URL` and `WEB_APP_URL` on https. Redis is optional (single-instance
+mode falls back to in-process state) but required for PM2 cluster / multi-instance deployments.
 
 ## Layout
 
@@ -56,13 +65,13 @@ state) but required for PM2 cluster / multi-instance deployments.
 index.js                 boot: env audit → Redis → Mongo + SQL → listen, graceful shutdown
 src/app.js               Express app (helmet, CORS, compression, routes, error handler)
 src/config/env.js        validated config        src/config/providers.js   provider OAuth registry
-src/db/{mongo,sql,redis} connections; redis.js also exports `kv` (Redis or memory fallback)
-src/models/sql           User, ApiKey (Sequelize)
+src/db/{mongo,sql,redis} connections; sql.js syncs only ide_* tables; redis.js exports `kv`
+src/models/sql           User (read-only view of the platform's Users), ApiKey, IdeWallet
 src/models/mongo         LoginEvent, UserSettings, UsageEvent (Mongoose)
-src/middleware           auth (device key or JWT), rate limits, validation, errors, trust proxy
-src/services             authService, oauthWebService, desktopAuthService, apiKeyService,
-                         providerRelayService, modelGatewayService, usageService, ...
-src/routes               health, desktop (HTML pages), auth, account, providerAuth, v1
+src/middleware           auth (device key or platform JWT), rate limits, validation, errors
+src/services             desktopAuthService, apiKeyService, walletService, usageService,
+                         modelGatewayService, providerRelayService, userService
+src/routes               health, desktop (302 → website), auth, account, providerAuth, v1
 scripts/                 check-env, import-env, sync-sql
 __tests__/               Jest + supertest
 ```
@@ -79,17 +88,19 @@ in the IDE repo).
 ```
 GET  /desktop/login | /desktop/signup   ?client=desktop&redirect_uri=atomesus://auth-callback?editor_state=…
                                         &code_challenge=…&code_challenge_method=S256
-     → page with GitHub / Google / email; when the browser is already signed in it asks
-       "Sign in to Atomesus desktop as …?" then redirects to redirect_uri + &code=…
-       (Cancel → &error=access_denied)
+     → 302 to {WEB_APP_URL}/desktop/login|signup with the same query (bad query → …?error=<code>)
+POST /api/auth/desktop/approve          Bearer <website auth_token>, body = the same four fields
+     → { redirectTo: redirect_uri + &code=…, user }       (called by the website page on "Continue")
+POST /api/auth/desktop/deny             body = the same four fields → { redirectTo: …&error=access_denied }
 POST /api/auth/desktop/exchange         { code, codeVerifier }
-     → { token: "sk_…", session: { expiresAt }, user: { id, email, name, image, githubLogin, plan } }
+     → { token: "sk_…", session: { expiresAt }, user: { id, email, name, image: null, githubLogin: null, plan } }
 DELETE /api/auth/api-keys/current       Bearer sk_… → 204 (IDE sign-out)
 ```
 
 `redirect_uri` must use a scheme in `DESKTOP_REDIRECT_SCHEMES` (default `atomesus`, `orbit`,
 matching `product.json` `urlProtocol`). Codes are single-use, PKCE-bound, 5-minute TTL.
 Device keys are `sk_` + 43 chars, stored as SHA-256, 30-day TTL (`DEVICE_KEY_TTL_DAYS`).
+`approve` requires the website session (a device key cannot approve further sign-ins).
 
 ### Hosted models (IDE `orbit` provider, Bearer `sk_…`)
 
@@ -102,33 +113,31 @@ GET  /api/usage                { wallet, limits, billingPeriod, last30Days }
 ```
 
 Credits: `ceil(input_tokens/1000 × INPUT_CREDIT_MULTIPLIER + output_tokens/1000 × OUTPUT_CREDIT_MULTIPLIER)`,
-cached input billed at 10 %. Subscription credits refill every 30 days to the plan allowance
-(`FREE_PLAN_MONTHLY_CREDITS` / `PRO_PLAN_MONTHLY_CREDITS`); top-ups are spent after them.
+cached input billed at 10 %. Credits live in `ide_wallets` (one row per platform user, created on first use). The plan comes
+from the platform's `planType`: `free` gets `FREE_PLAN_MONTHLY_CREDITS`, any paid plan gets
+`PRO_PLAN_MONTHLY_CREDITS`, a lapsed `planExpiryDate` counts as free. Subscription credits refill
+every 30 days; top-ups are spent after them.
 `ATOMESUS_MODELS` (JSON array) overrides the served list.
 
-### Platform auth (website / API)
+### Session (Bearer = website `auth_token` JWT or `sk_…`)
+
+Sign-up, login, Google and password reset are the platform's (`zero_thought_node`
+`/api/auth/*`, used by the website). This server only reads the resulting session.
 
 ```
-POST /api/auth/signup/request-otp   { email, name, password }   → emails a 6-digit code
-POST /api/auth/signup/verify-otp    { email, otp }              → 201 { token, user } (+ session cookie)
-POST /api/auth/login                { email, password }
-POST /api/auth/login/google         { idToken }                 (one-tap / mobile)
-GET  /api/auth/github | /google     [?flow=<desktop flow>|&return_to=/path] → provider → /callback
-GET  /api/auth/me                   Bearer JWT or sk_
-POST /api/auth/logout
-POST /api/auth/forgot-password      { email }   → POST /verify-otp { email, otp } → { resetToken }
-POST /api/auth/reset-password       { resetToken, password }    (revokes every device key)
-POST /api/auth/change-password      { currentPassword, newPassword }
+GET  /api/auth/me        → { user, auth: { kind: "platform_session" | "device_key" } }
+POST /api/auth/logout    revokes the device key when called with one
 ```
 
 ### Account (Bearer JWT or sk_)
 
 ```
-GET/PATCH /api/account/profile
+GET  /api/account/profile             read-only; edit the profile on the platform (PUT /api/updateProfile)
 GET  /api/account/devices             DELETE /api/account/devices/:id   POST /api/account/devices/revoke-all
 GET  /api/account/login-history?limit=50
 GET/PUT /api/account/settings         { settings, version } — optimistic version check (409 on conflict)
-DELETE /api/account                   { confirm: "DELETE", password? } — scrubs SQL row, purges Mongo
+DELETE /api/account/ide-data          { confirm: "DELETE" } — revokes keys, drops the wallet, purges Mongo
+                                      (the account itself is deleted on the platform)
 ```
 
 ### Provider relay (no auth, no records)
@@ -158,13 +167,12 @@ states, config flags and audit warnings. `GET /health/ready` checks Mongo, SQL (
 zero_thought_node). Behind nginx/ALB set `TRUST_PROXY_HOPS` or leave unset for
 `loopback, uniquelocal`. Set `REDIS_REQUIRED=true` whenever more than one instance runs.
 
-## Follow-ups on the IDE side
+## Follow-ups
 
-- The IDE's account gate (`atomesusAccountGate.ts`) only offers "Continue without an account"
-  when `orbitApiUrl` is unset. To let a ChatGPT/Claude sign-in satisfy the gate, the gate needs
-  to accept a connected provider as signed-in.
-- The IDE has no Claude OAuth flow yet (Anthropic is API-key only). The relay's `claude`
-  provider is ready for one; the IDE needs a `claude-oauth` manager like `openai-codex/`.
+- IDE top-ups and plan allowances per tier (`go`/`core`/`prime`/`plus`…) are not wired to the
+  platform's payments yet; every paid plan gets `PRO_PLAN_MONTHLY_CREDITS`.
+- When the platform deletes an account it does not call `DELETE /api/account/ide-data`; wire that
+  into zero_thought_node's `accountDeletionService` so device keys die with the account.
 - Codex/Grok/Cline token exchanges still go straight to the provider from Electron. Switching
   them to `/api/provider-auth/:provider/exchange` is optional and lets client ids / endpoints
   change without an IDE release.

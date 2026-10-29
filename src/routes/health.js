@@ -29,8 +29,7 @@ router.get("/health", (req, res) => {
     sql: { dialect: sequelize.getDialect() },
     redis: { configured: isRedisEnabled(), connected: Boolean(getRedisClient()) },
     config: {
-      github: Boolean(config.GITHUB_CLIENT_ID),
-      google: Boolean(config.GOOGLE_CLIENT_ID),
+      website: config.WEB_APP_URL,
       providerRelay: config.PROVIDER_RELAY_ENABLED ? listProviders().map((p) => p.id) : [],
       modelGateway: Boolean(config.ATOMESUS_BASE_URL),
     },

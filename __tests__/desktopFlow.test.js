@@ -1,57 +1,60 @@
-const { bootTestApp, shutdownTestApp, signupUser, request } = require("./helpers");
+const jwt = require("jsonwebtoken");
+const { bootTestApp, shutdownTestApp, createPlatformUser, request } = require("./helpers");
 const pkce = require("../src/lib/pkce");
-const { User, ApiKey } = require("../src/models/sql");
+const { ApiKey } = require("../src/models/sql");
 
 let app;
 beforeAll(async () => { app = await bootTestApp(); });
 afterAll(shutdownTestApp);
 
 const REDIRECT = "atomesus://auth-callback?editor_state=abcdef0123456789abcdef0123456789";
+const query = (challenge) => ({ client: "desktop", redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" });
 
-describe("platform auth + desktop sign-in", () => {
-  it("creates a verified user through OTP and logs in with the password", async () => {
-    const { email, password, token } = await signupUser(app);
+describe("platform session + desktop sign-in", () => {
+  it("accepts the platform's JWT and refuses admin/reset tokens", async () => {
+    const { token, email } = await createPlatformUser(app);
     const me = await request(app).get("/api/auth/me").set("authorization", `Bearer ${token}`).expect(200);
     expect(me.body.data.user.email).toBe(email);
-    expect(me.body.data.user.passwordHash).toBeUndefined();
-    await request(app).post("/api/auth/login").send({ email, password: "nope-nope-nope" }).expect(401);
-    const login = await request(app).post("/api/auth/login").send({ email, password }).expect(200);
-    expect(login.body.data.token).toBeTruthy();
-    const row = await User.findOne({ where: { email } });
-    expect(row.emailVerifiedAt).toBeTruthy();
+    expect(me.body.data.auth.kind).toBe("platform_session");
+    const admin = jwt.sign({ id: "507f1f77bcf86cd799439011", email }, process.env.JWT_SECRET);
+    await request(app).get("/api/auth/me").set("authorization", `Bearer ${admin}`).expect(401);
+    const reset = jwt.sign({ email, purpose: "password_reset" }, process.env.JWT_SECRET);
+    await request(app).get("/api/auth/me").set("authorization", `Bearer ${reset}`).expect(401);
+    const unknown = jwt.sign({ id: "00000000-0000-4000-8000-000000000000", email }, process.env.JWT_SECRET);
+    await request(app).get("/api/auth/me").set("authorization", `Bearer ${unknown}`).expect(401);
   });
 
-  it("refuses a duplicate verified account", async () => {
-    const { email } = await signupUser(app);
-    await request(app).post("/api/auth/signup/request-otp").send({ email, name: "X", password: "correct-horse-battery" }).expect(409);
+  it("forwards the IDE's /desktop/login to the website with the same query", async () => {
+    const res = await request(app).get("/desktop/login").query(query("c".repeat(43))).expect(302);
+    const url = new URL(res.headers.location);
+    expect(url.origin + url.pathname).toBe("http://localhost:3000/desktop/login");
+    expect(url.searchParams.get("redirect_uri")).toBe(REDIRECT);
+    expect(url.searchParams.get("code_challenge")).toBe("c".repeat(43));
+    const bad = await request(app).get("/desktop/signup").query({ ...query("c".repeat(43)), redirect_uri: "https://evil.example/cb?editor_state=abcdef0123456789abcdef0123456789" }).expect(302);
+    expect(new URL(bad.headers.location).searchParams.get("error")).toBe("invalid_redirect_uri");
   });
 
   it("runs the PKCE desktop flow and issues a device key once", async () => {
-    const { cookie } = await signupUser(app);
+    const { token } = await createPlatformUser(app);
     const verifier = pkce.generateVerifier();
     const challenge = pkce.challengeFor(verifier);
 
-    const page = await request(app).get("/desktop/login").query({ client: "desktop", redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" }).set("cookie", cookie).expect(200);
-    expect(page.text).toMatch(/Sign in to Atomesus desktop\?/);
-    const flow = page.text.match(/name="flow" value="([^"]+)"/)[1];
-
-    const done = await request(app).post("/desktop/approve").type("form").send({ flow }).set("cookie", cookie).expect(200);
-    const href = done.text.match(/href="(atomesus:\/\/[^"]+)"/)[1].replace(/&amp;/g, "&");
-    const url = new URL(href);
+    await request(app).post("/api/auth/desktop/approve").send(query(challenge)).expect(401); // website session required
+    const approved = await request(app).post("/api/auth/desktop/approve").set("authorization", `Bearer ${token}`).send(query(challenge)).expect(200);
+    const url = new URL(approved.body.data.redirectTo);
+    expect(url.protocol).toBe("atomesus:");
     expect(url.searchParams.get("editor_state")).toBe("abcdef0123456789abcdef0123456789");
     const code = url.searchParams.get("code");
     expect(code).toBeTruthy();
 
     await request(app).post("/api/auth/desktop/exchange").send({ code, codeVerifier: pkce.generateVerifier() }).expect(400); // wrong verifier burns the code
-    const page2 = await request(app).get("/desktop/login").query({ client: "desktop", redirect_uri: REDIRECT, code_challenge: challenge, code_challenge_method: "S256" }).set("cookie", cookie).expect(200);
-    const flow2 = page2.text.match(/name="flow" value="([^"]+)"/)[1];
-    const done2 = await request(app).post("/desktop/approve").type("form").send({ flow: flow2 }).set("cookie", cookie).expect(200);
-    const code2 = new URL(done2.text.match(/href="(atomesus:\/\/[^"]+)"/)[1].replace(/&amp;/g, "&")).searchParams.get("code");
+    const again = await request(app).post("/api/auth/desktop/approve").set("authorization", `Bearer ${token}`).send(query(challenge)).expect(200);
+    const code2 = new URL(again.body.data.redirectTo).searchParams.get("code");
 
     const ex = await request(app).post("/api/auth/desktop/exchange").send({ code: code2, codeVerifier: verifier }).expect(200);
     expect(ex.body.token).toMatch(/^sk_/);
     expect(Date.parse(ex.body.session.expiresAt)).toBeGreaterThan(Date.now());
-    expect(ex.body.user).toMatchObject({ id: expect.any(String), email: expect.any(String), plan: "free" });
+    expect(ex.body.user).toMatchObject({ id: expect.any(String), email: expect.any(String), plan: "free", image: null, githubLogin: null });
     await request(app).post("/api/auth/desktop/exchange").send({ code: code2, codeVerifier: verifier }).expect(400);
 
     const sk = ex.body.token;
@@ -61,6 +64,8 @@ describe("platform auth + desktop sign-in", () => {
     expect(usage.body.wallet.availableCredits).toBe("10");
     const devices = await request(app).get("/api/account/devices").set("authorization", `Bearer ${sk}`).expect(200);
     expect(devices.body.data.devices).toHaveLength(1);
+    // a device key cannot approve further desktop sign-ins
+    await request(app).post("/api/auth/desktop/approve").set("authorization", `Bearer ${sk}`).send(query(challenge)).expect(400);
 
     await request(app).delete("/api/auth/api-keys/current").set("authorization", `Bearer ${sk}`).expect(204);
     await request(app).get("/api/v1/models").set("authorization", `Bearer ${sk}`).expect(401);
@@ -69,31 +74,18 @@ describe("platform auth + desktop sign-in", () => {
     expect(keyRow.keyHash).not.toContain(sk.slice(3, 20));
   });
 
-  it("rejects a redirect_uri that is not the desktop deep link", async () => {
-    await request(app).get("/desktop/login").query({ client: "desktop", redirect_uri: "https://evil.example/cb?editor_state=abcdef0123456789abcdef0123456789", code_challenge: "c".repeat(43), code_challenge_method: "S256" }).expect(400);
+  it("deny returns the deep link with error=access_denied without storing anything", async () => {
+    const res = await request(app).post("/api/auth/desktop/deny").send(query("c".repeat(43))).expect(200);
+    expect(res.body.data.redirectTo).toMatch(/error=access_denied/);
   });
 
-  it("cancel redirects with error=access_denied", async () => {
-    const page = await request(app).get("/desktop/login").query({ client: "desktop", redirect_uri: REDIRECT, code_challenge: "c".repeat(43), code_challenge_method: "S256" }).expect(200);
-    const flow = page.text.match(/name="flow" value="([^"]+)"/)[1];
-    const done = await request(app).post("/desktop/cancel").type("form").send({ flow }).expect(200);
-    expect(done.text).toMatch(/error=access_denied/);
-  });
-
-  it("password reset signs every device out", async () => {
-    const { email, token } = await signupUser(app);
-    const logs = [];
-    const orig = console.log;
-    console.log = (...a) => logs.push(a.join(" "));
-    try {
-      await request(app).post("/api/auth/forgot-password").send({ email }).expect(200);
-    } finally {
-      console.log = orig;
-    }
-    const otp = logs.join("\n").match(/is: (\d{6})/)[1];
-    const v = await request(app).post("/api/auth/verify-otp").send({ email, otp }).expect(200);
-    await request(app).post("/api/auth/reset-password").send({ resetToken: v.body.data.resetToken, password: "new-password-123" }).expect(200);
-    await request(app).post("/api/auth/login").send({ email, password: "new-password-123" }).expect(200);
-    expect(token).toBeTruthy();
+  it("paid plans get the paid allowance and lapsed ones fall back to free", async () => {
+    const paid = await createPlatformUser(app, { planType: "Prime" });
+    const u1 = await request(app).get("/api/usage").set("authorization", `Bearer ${paid.token}`).expect(200);
+    expect(u1.body.limits.plan).toBe("prime");
+    expect(u1.body.limits.monthlyCredits).toBe("5000");
+    const lapsed = await createPlatformUser(app, { planType: "core", planExpiryDate: new Date(Date.now() - 1000) });
+    const u2 = await request(app).get("/api/usage").set("authorization", `Bearer ${lapsed.token}`).expect(200);
+    expect(u2.body.limits.plan).toBe("free");
   });
 });
