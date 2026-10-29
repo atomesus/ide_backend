@@ -163,6 +163,9 @@ states, config flags and audit warnings. `GET /health/ready` checks Mongo, SQL (
 
 ## Deploy
 
+Production runs on EC2 behind nginx at `https://ide-api.atomesus.com`; follow
+[`deploy/README.md`](deploy/README.md) (AWS, server setup, env, GitHub Actions workflow).
+
 `Dockerfile` (node:20-alpine, port 4100) and `ecosystem.config.js` (PM2 cluster, same shape as
 zero_thought_node). Behind nginx/ALB set `TRUST_PROXY_HOPS` or leave unset for
 `loopback, uniquelocal`. Set `REDIS_REQUIRED=true` whenever more than one instance runs.
