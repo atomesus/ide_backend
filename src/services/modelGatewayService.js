@@ -76,6 +76,12 @@ function adaptBody(model, body, stream) {
   if (model.provider === "anthropic" && out.max_tokens == null && out.max_completion_tokens == null) {
     out.max_tokens = 16384;
   }
+  if (model.provider === "atomesus") {
+    // The Ethos gateway caps a reply at 1024 tokens unless the request names max_tokens (the IDE
+    // sends max_completion_tokens); vLLM accepts both, so make the limit explicit.
+    if (out.max_tokens == null) out.max_tokens = out.max_completion_tokens ?? config.ATOMESUS_MAX_OUTPUT_TOKENS;
+    delete out.max_completion_tokens;
+  }
   return out;
 }
 

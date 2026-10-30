@@ -103,6 +103,7 @@ const schema = z.object({
   ATOMESUS_API_KEY: str(""),
   ATOMESUS_HOSTED_CHAT_API_KEY: str(""),
   ATOMESUS_MAX_CONTEXT_TOKENS: int(256000),
+  ATOMESUS_MAX_OUTPUT_TOKENS: int(8192),
   CLAUDE_API_KEY: str(""),
   ANTHROPIC_BASE_URL: str("https://api.anthropic.com/v1"),
   OPENAI_API_KEY: str(""),

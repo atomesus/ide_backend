@@ -148,6 +148,14 @@ describe("model gateway", () => {
     await chat(token, "gpt-6-luna").expect(400);
   });
 
+  it("makes the output limit explicit for Ethos so the gateway does not cap replies at 1024 tokens", () => {
+    const ethos = gateway.findModel("ethos-6");
+    expect(gateway.adaptBody(ethos, { messages: [], max_completion_tokens: 4096 }, true)).toMatchObject({ model: "ethos-6", max_tokens: 4096, stream: true, stream_options: { include_usage: true } });
+    expect(gateway.adaptBody(ethos, { messages: [] }, false).max_tokens).toBe(8192);
+    expect(gateway.adaptBody(ethos, { messages: [], max_tokens: 100, max_completion_tokens: 4096 }, false)).toMatchObject({ max_tokens: 100 });
+    expect("max_completion_tokens" in gateway.adaptBody(ethos, { messages: [], max_completion_tokens: 4096 }, false)).toBe(false);
+  });
+
   it("prices cached input at the cache rate and long Haiku prompts at the long-context rate", () => {
     expect(gateway.extractUsage('data: {"usage":{"prompt_tokens":5}}')).toEqual({ prompt_tokens: 5 });
     expect(gateway.extractUsage("data: [DONE]")).toBeNull();
