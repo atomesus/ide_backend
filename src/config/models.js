@@ -1,11 +1,18 @@
 /**
- * Hosted models the IDE can pick from. Every entry is shown under its real
- * name and sent to the provider it names; users choose freely between them.
+ * Hosted models the IDE can pick from. Paid IDE plans get exactly this list;
+ * free accounts get none (modelGatewayService answers 402 plan_required).
  *
- * Prices are the providers' list prices in USD per million tokens
- * (Anthropic and OpenAI pricing pages, checked 2026-10-29). They decide what a
+ * Each entry has two names:
+ *   id / name       what the IDE lists and shows (public catalog name)
+ *   upstreamModel   the model id actually sent to the provider
+ * Only the public name leaves this server: /api/v1/models never includes
+ * upstreamModel, and usage events are recorded under the public id.
+ *
+ * Prices are the providers' list prices for the UPSTREAM model in USD per
+ * million tokens (Anthropic and OpenAI pricing pages). They decide what a
  * request costs the user's wallet, so keep them current. Override or add
- * entries with IDE_MODELS (JSON array, matched by id).
+ * entries with IDE_MODELS (JSON array, matched by id; `upstreamModel`,
+ * `name`, `provider`, prices and `disabled: true` are all accepted).
  */
 const { config } = require("./env");
 const logger = require("../lib/logger");
@@ -16,27 +23,21 @@ function catalog() {
       id: config.ATOMESUS_MODEL || "ethos-6",
       name: "Ethos 6",
       provider: "atomesus",
+      upstreamModel: config.ATOMESUS_MODEL || "ethos-6",
       contextWindow: config.ATOMESUS_MAX_CONTEXT_TOKENS,
       supportsTools: true,
       supportsReasoning: false,
-      // Runs on our own GPUs. Priced like Haiku so heavy use still counts against the
-      // plan budget and one user cannot hold the GPUs; set to 0 to make it free on paid plans.
+      // Runs on our own GPUs (self-hosted vLLM; served once ATOMESUS_BASE_URL is set). Priced
+      // like Haiku so heavy use still counts against the plan budget and one user cannot hold
+      // the GPUs; set to 0 to make it free on paid plans.
       priceUsdPerMTok: { input: 0.1, cachedInput: 0.01, output: 0.5 },
       maxConcurrentPerUser: config.ETHOS_MAX_CONCURRENT_PER_USER,
     },
     {
-      id: "claude-sonnet-5-5",
-      name: "Claude Sonnet 5.5",
+      id: "opus-5.5",
+      name: "Opus 5.5",
       provider: "anthropic",
-      contextWindow: 200000,
-      supportsTools: true,
-      supportsReasoning: true,
-      priceUsdPerMTok: { input: 2, cachedInput: 0.1, output: 10 },
-    },
-    {
-      id: "claude-haiku-5-5",
-      name: "Claude Haiku 5.5",
-      provider: "anthropic",
+      upstreamModel: "claude-haiku-5-5",
       // Anthropic charges 5x above 100k input tokens; capping the window keeps every
       // request on the cheap tier (the IDE trims history to the window).
       contextWindow: 100000,
@@ -46,22 +47,16 @@ function catalog() {
       longContext: { overInputTokens: 100000, priceUsdPerMTok: { input: 0.5, cachedInput: 0.05, output: 2.5 } },
     },
     {
-      id: "gpt-5.6-luna",
-      name: "GPT-5.6 Luna",
+      id: "gpt-6.1-sol",
+      name: "GPT-6.1 Sol",
       provider: "openai",
-      contextWindow: 272000,
+      upstreamModel: "gpt-6-luna",
+      // GPT-6 Luna: 1M-token window; list price taken as $0.20 / $1.00 per MTok (gateways quote
+      // $0.10-$0.20 in, $0.50-$1.00 out) - the higher figure so the wallet never under-charges.
+      contextWindow: 1000000,
       supportsTools: true,
       supportsReasoning: true,
-      priceUsdPerMTok: { input: 0.2, cachedInput: 0.02, output: 1.2 },
-    },
-    {
-      id: "gpt-5-nano",
-      name: "GPT-5 nano",
-      provider: "openai",
-      contextWindow: 272000,
-      supportsTools: true,
-      supportsReasoning: true,
-      priceUsdPerMTok: { input: 0.05, cachedInput: 0.005, output: 0.4 },
+      priceUsdPerMTok: { input: 0.2, cachedInput: 0.02, output: 1 },
     },
   ];
 }
@@ -99,7 +94,7 @@ function allModels() {
       logger.warn("model has no price; not served", { id: m.id });
       continue;
     }
-    out.push({ upstreamModel: m.id, name: m.id, ...m });
+    out.push({ ...m, name: m.name || m.id, upstreamModel: m.upstreamModel || m.id });
   }
   return out;
 }

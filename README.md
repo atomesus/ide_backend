@@ -105,19 +105,32 @@ Device keys are `sk_` + 43 chars, stored as SHA-256, 30-day TTL (`DEVICE_KEY_TTL
 ### Hosted models (IDE `orbit` provider, Bearer `sk_…`)
 
 ```
-GET  /api/v1/models            { data: [{ id, orbit: { contextWindow, supportsTools, … } }] }
-POST /api/v1/chat/completions  OpenAI-style body, SSE passthrough to ATOMESUS_BASE_URL;
-                               usage chunk → credits deducted; 402 insufficient_credits,
-                               429 usage_limit_exceeded, 503 gateway unconfigured/unavailable
-GET  /api/usage                { wallet, limits, billingPeriod, last30Days }
+GET  /api/v1/models            { data: [{ id, name, orbit: { displayName, contextWindow, supportsTools, … } }] }
+POST /api/v1/chat/completions  OpenAI-style body with a catalog model id; SSE passthrough to the
+                               model's provider; usage chunk → credits deducted; 402 plan_required /
+                               insufficient_credits, 429 usage_limit_exceeded, 503 gateway unavailable
+GET  /api/usage                { wallet, limits, entitlements, billingPeriod, last30Days }
 ```
+
+Catalog (`src/config/models.js`): paid IDE plans get exactly these; free accounts get 402 `plan_required`.
+
+| Catalog id (what the IDE sends and shows) | Upstream model (what the provider gets) | Needs |
+|---|---|---|
+| `ethos-6` · "Ethos 6" | `ATOMESUS_MODEL` on our vLLM | `ATOMESUS_BASE_URL` |
+| `opus-5.5` · "Opus 5.5" | `claude-haiku-5-5` (Anthropic) | `CLAUDE_API_KEY` |
+| `gpt-6.1-sol` · "GPT-6.1 Sol" | `gpt-6-luna` (OpenAI) | `OPENAI_API_KEY` |
+
+The upstream id never leaves this server: `/api/v1/models` omits it, the gateway rewrites the
+`model` field of provider answers (JSON and SSE) to the catalog id, usage events carry the catalog
+id, and an upstream id sent as `model` is an unknown model (400). Wallet charges use the upstream
+model's list price. `IDE_MODELS` (JSON array matched by `id`) overrides or adds entries, e.g.
+`[{"id":"opus-5.5","upstreamModel":"claude-sonnet-5-5"}]` or `[{"id":"gpt-6.1-sol","disabled":true}]`.
 
 Credits: `ceil(input_tokens/1000 × INPUT_CREDIT_MULTIPLIER + output_tokens/1000 × OUTPUT_CREDIT_MULTIPLIER)`,
 cached input billed at 10 %. Credits live in `ide_wallets` (one row per platform user, created on first use). The plan comes
 from the platform's `planType`: `free` gets `FREE_PLAN_MONTHLY_CREDITS`, any paid plan gets
 `PRO_PLAN_MONTHLY_CREDITS`, a lapsed `planExpiryDate` counts as free. Subscription credits refill
 every 30 days; top-ups are spent after them.
-`ATOMESUS_MODELS` (JSON array) overrides the served list.
 
 ### Session (Bearer = website `auth_token` JWT or `sk_…`)
 
@@ -176,6 +189,7 @@ zero_thought_node). Behind nginx/ALB set `TRUST_PROXY_HOPS` or leave unset for
   platform's payments yet; every paid plan gets `PRO_PLAN_MONTHLY_CREDITS`.
 - When the platform deletes an account it does not call `DELETE /api/account/ide-data`; wire that
   into zero_thought_node's `accountDeletionService` so device keys die with the account.
-- Codex/Grok/Cline token exchanges still go straight to the provider from Electron. Switching
-  them to `/api/provider-auth/:provider/exchange` is optional and lets client ids / endpoints
-  change without an IDE release.
+- (Done) Codex, SuperGrok (browser flow) and Cline token exchanges and refreshes go through
+  `/api/provider-auth/:provider/{exchange,refresh}` whenever the IDE has an account server, and
+  straight to the provider otherwise (`electron-main/providerRelay.ts` in the IDE). SuperGrok's
+  device-code flow has no relay endpoint and stays direct.

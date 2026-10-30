@@ -3,7 +3,11 @@
  * completions here with its device key. Each model is forwarded to its own
  * provider (our Ethos vLLM, Anthropic or OpenAI, all OpenAI-compatible), the
  * SSE stream is passed back, and the user's rupee wallet is charged at the
- * model's real price from the final usage chunk.
+ * upstream model's real price from the final usage chunk.
+ *
+ * Models are listed under their catalog name (src/config/models.js); the
+ * upstream model id is used only on the provider request and is rewritten back
+ * to the catalog id in whatever the provider returns.
  */
 const { config } = require("../config/env");
 const { allModels, providers } = require("../config/models");
@@ -23,7 +27,10 @@ function findModel(id) {
   return listModels().find((m) => m.id === id) || null;
 }
 
-/** /api/v1/models response (shape read by electron-main/llmMessage/orbitProviderList.ts). */
+/**
+ * /api/v1/models response (shape read by electron-main/llmMessage/orbitProviderList.ts).
+ * Only the catalog id and name are sent; `upstreamModel` stays on this server.
+ */
 function modelsResponse() {
   // The IDE reads these as USD per token (x 1e6 = vendor list price per million tokens).
   const perToken = (usdPerMTok) => usdPerMTok / 1e6;
@@ -70,6 +77,12 @@ function adaptBody(model, body, stream) {
     out.max_tokens = 16384;
   }
   return out;
+}
+
+/** Replaces the provider's model id with the catalog id in a response line or body. */
+function publicizeModel(model, text) {
+  if (!model.upstreamModel || model.upstreamModel === model.id) return text;
+  return String(text).split(JSON.stringify(model.upstreamModel)).join(JSON.stringify(model.id));
 }
 
 /** Rough token count for text we never got a usage report for (about 4 characters per token). */
@@ -190,6 +203,7 @@ async function proxyChatCompletion(req, res) {
     const json = await upstream.json().catch(() => null);
     if (!json) throw new HttpError(502, "Invalid upstream response.", "upstream_error");
     finish(json.usage, "ok");
+    if (json.model) json.model = model.id;
     return res.json(json);
   }
 
@@ -207,17 +221,19 @@ async function proxyChatCompletion(req, res) {
       const { value, done } = await reader.read();
       if (done) break;
       const text = decoder.decode(value, { stream: true });
-      res.write(text);
       streamedChars += text.length;
       buffer += text;
+      // Forward whole lines so the model id can be rewritten even when a chunk splits a line.
       let idx;
       while ((idx = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, idx).trim();
+        const rawLine = buffer.slice(0, idx + 1);
         buffer = buffer.slice(idx + 1);
-        const u = extractUsage(line);
+        res.write(publicizeModel(model, rawLine));
+        const u = extractUsage(rawLine.trim());
         if (u) lastUsage = u;
       }
     }
+    if (buffer) res.write(publicizeModel(model, buffer));
   } catch (err) {
     status = ac.signal.aborted ? "aborted" : "error";
     if (!ac.signal.aborted) logger.warn("model gateway stream interrupted", { error: err.message });
@@ -227,4 +243,4 @@ async function proxyChatCompletion(req, res) {
   }
 }
 
-module.exports = { listModels, findModel, modelsResponse, proxyChatCompletion, extractUsage, upstreamUrl, adaptBody, _resetForTests: () => {} };
+module.exports = { listModels, findModel, modelsResponse, proxyChatCompletion, extractUsage, upstreamUrl, adaptBody, publicizeModel, _resetForTests: () => {} };
