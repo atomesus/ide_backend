@@ -7,7 +7,7 @@ const apiKeys = require("../services/apiKeyService");
 const { listLogins } = require("../services/loginEventService");
 const { isMongoReady } = require("../db/mongo");
 const { UserSettings, LoginEvent, UsageEvent } = require("../models/mongo");
-const { IdeWallet } = require("../models/sql");
+const { IdeWallet, IdeWalletTopUp } = require("../models/sql");
 const { unavailable } = require("../lib/errors");
 
 const router = express.Router();
@@ -62,6 +62,7 @@ router.delete("/ide-data", validate({ body: z.object({ confirm: z.literal("DELET
   const userId = req.user.id;
   await apiKeys.revokeAllForUser(userId);
   await IdeWallet.destroy({ where: { userId } });
+  await IdeWalletTopUp.destroy({ where: { userId } });
   if (isMongoReady()) {
     await Promise.all([UserSettings.deleteMany({ userId }), LoginEvent.deleteMany({ userId }), UsageEvent.deleteMany({ userId })]);
   }

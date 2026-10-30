@@ -24,11 +24,10 @@ const sequelize = buildSequelize();
 
 /** Creates/alters only the ide_* tables. The platform's Users table is never touched. */
 async function syncOwnedTables({ alter = false } = {}) {
-  const { IDE_OWNED_MODELS, User, IdeSubscription } = require("../models/sql");
+  const { IDE_OWNED_MODELS, PLATFORM_MODELS } = require("../models/sql");
   if (config.isTest && config.DB_DIALECT === "sqlite") {
     // tests seed fake platform rows
-    await User.sync();
-    await IdeSubscription.sync();
+    for (const model of PLATFORM_MODELS) await model.sync();
   }
   for (const model of IDE_OWNED_MODELS) await model.sync({ alter });
 }

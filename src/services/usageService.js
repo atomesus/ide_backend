@@ -71,6 +71,7 @@ async function usageSummary(user) {
     },
     limits: { plan, monthlyCredits: rupees(monthlyCreditsFor(plan)) },
     entitlements: entitlements(user),
+    topUpUrl: "https://www.atomesus.com/code#topup",
     billingPeriod: period == null ? null : { start: periodStart.toISOString(), totalCreditsDeducted: Number(rupees(period)) },
     last30Days: { totalCreditsDeducted: Number(rupees(last30 ?? 0)) },
   };

@@ -148,7 +148,7 @@ async function proxyChatCompletion(req, res) {
   const estimatedPrompt = roughTokens(promptText);
   const available = await usage.availableFor(user);
   if (available <= 0 || available < usage.creditsFor({ promptTokens: estimatedPrompt }, model)) {
-    throw new HttpError(402, "You have used this month's Atomesus model budget. It refills with your next billing period, or use your own API key.", "insufficient_credits");
+    throw new HttpError(402, "You have used this month's Atomesus model budget. Top up at atomesus.com/code#topup, use your own API key, or wait for your next billing period.", "insufficient_credits");
   }
 
   const release = await acquireSlot(user.id, model);

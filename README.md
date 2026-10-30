@@ -29,7 +29,7 @@ npm test                    # Jest (SQLite in-memory, local Mongo if reachable, 
 ```
 
 `DB_NAME` must be the platform database (the one with the `Users` table). Outside production the
-`ide_api_keys` and `ide_wallets` tables are created on boot; in production run `npm run db:sync`
+`ide_api_keys`, `ide_wallets` and `ide_wallet_topups` tables are created on boot; in production run `npm run db:sync`
 once (`-- --alter` after model changes). `Users` is never created, altered or written here.
 
 For a fully local stack use a local copy of the platform database and run the platform backend
@@ -66,7 +66,7 @@ index.js                 boot: env audit → Redis → Mongo + SQL → listen, g
 src/app.js               Express app (helmet, CORS, compression, routes, error handler)
 src/config/env.js        validated config        src/config/providers.js   provider OAuth registry
 src/db/{mongo,sql,redis} connections; sql.js syncs only ide_* tables; redis.js exports `kv`
-src/models/sql           User (read-only view of the platform's Users), ApiKey, IdeWallet
+src/models/sql           User, IdeSubscription, IdeTopUp (read-only views of platform tables), ApiKey, IdeWallet, IdeWalletTopUp
 src/models/mongo         LoginEvent, UserSettings, UsageEvent (Mongoose)
 src/middleware           auth (device key or platform JWT), rate limits, validation, errors
 src/services             desktopAuthService, apiKeyService, walletService, usageService,
@@ -130,7 +130,9 @@ Credits: `ceil(input_tokens/1000 × INPUT_CREDIT_MULTIPLIER + output_tokens/1000
 cached input billed at 10 %. Credits live in `ide_wallets` (one row per platform user, created on first use). The plan comes
 from the platform's `planType`: `free` gets `FREE_PLAN_MONTHLY_CREDITS`, any paid plan gets
 `PRO_PLAN_MONTHLY_CREDITS`, a lapsed `planExpiryDate` counts as free. Subscription credits refill
-every 30 days; top-ups are spent after them.
+every 30 days; top-ups are spent after them. Top-ups are sold by the platform (`/api/ide-billing/topups`,
+bought on `atomesus.com/code#topup`); each `paid` row of its `IdeTopUps` table is added to the wallet once
+(`ide_wallet_topups` keeps the applied ids) the next time the wallet is loaded, and never expires.
 
 ### Session (Bearer = website `auth_token` JWT or `sk_…`)
 
