@@ -155,6 +155,45 @@ describe("model gateway", () => {
     expect(bodies[1].messages[2].tool_call_id).toBe("toolu_01ABCdef");
   });
 
+  it("lets a slow reply stream past the start-up limit, and reports a reply that goes silent", async () => {
+    const { config } = require("../src/config/env");
+    const saved = { first: config.CHAT_UPSTREAM_TIMEOUT_MS, idle: config.CHAT_STREAM_IDLE_MS };
+    config.CHAT_UPSTREAM_TIMEOUT_MS = 100;
+    config.CHAT_STREAM_IDLE_MS = 150;
+    const enc = new TextEncoder();
+    // Streams `n` chunks `gapMs` apart, then optionally stalls; errors when the gateway aborts it.
+    const slowStream = (n, gapMs, stallAfter) => jest.fn(async (url, init) => new Response(new ReadableStream({
+      async start(c) {
+        init.signal.addEventListener("abort", () => { try { c.error(new Error("aborted")); } catch { /* closed */ } });
+        for (let i = 0; i < n; i++) {
+          if (init.signal.aborted) return;
+          c.enqueue(enc.encode(`data: {"choices":[{"index":0,"delta":{"content":"w${i} "}}]}\n\n`));
+          await new Promise((r) => setTimeout(r, gapMs));
+        }
+        if (stallAfter) return; // never closes: the gateway must notice the silence
+        c.enqueue(enc.encode("data: [DONE]\n\n"));
+        c.close();
+      },
+    }), { status: 200, headers: { "content-type": "text/event-stream" } }));
+    try {
+      const { token } = await createPlatformUser(app, { idePlan: "ide_299" });
+      // 8 chunks 60ms apart = ~480ms in total, far past the 100ms start-up limit.
+      global.fetch = slowStream(8, 60, false);
+      const ok = await chat(token, "ethos-6").expect(200);
+      expect(ok.text).toMatch(/w7 /);
+      expect(ok.text).toMatch(/\[DONE\]/);
+      expect(ok.text).not.toMatch(/error/);
+      // Two chunks, then silence longer than the idle limit: the IDE gets an error, not a silent end.
+      global.fetch = slowStream(2, 10, true);
+      const stalled = await chat(token, "ethos-6").expect(200);
+      expect(stalled.text).toMatch(/w1 /);
+      expect(stalled.text).toMatch(/"error":\{"message":"Ethos 6 stopped responding\. Try again\."\}/);
+    } finally {
+      config.CHAT_UPSTREAM_TIMEOUT_MS = saved.first;
+      config.CHAT_STREAM_IDLE_MS = saved.idle;
+    }
+  });
+
   it("answers 402 when the month's budget is used up", async () => {
     const { token, user } = await createPlatformUser(app, { idePlan: "ide_299" });
     await wallets.ensureWallet(await require("../src/services/userService").findById(user.id));

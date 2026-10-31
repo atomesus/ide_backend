@@ -111,7 +111,10 @@ const schema = z.object({
   // JSON array overriding or adding catalog entries (by id); see src/config/models.js.
   IDE_MODELS: str(""),
   ATOMESUS_MODELS: str(""),
+  // Wait for a reply to start. Once it streams, only silence or the total cap stops it.
   CHAT_UPSTREAM_TIMEOUT_MS: int(90000),
+  CHAT_STREAM_IDLE_MS: int(120000),
+  CHAT_STREAM_MAX_MS: int(1800000),
 
   // Money. Wallets are kept in credits of Rs 0.0001; model prices are in USD.
   // Rupees charged per US dollar of provider cost. Keep it above the market rate (about 95 in

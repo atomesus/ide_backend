@@ -164,9 +164,20 @@ async function proxyChatCompletion(req, res) {
   const stream = body.stream !== false;
   const upstreamBody = adaptBody(model, body, stream);
 
+  // ac: the IDE went away (client abort). limit: our own time limits. Time limits must not cut a
+  // healthy reply short: CHAT_UPSTREAM_TIMEOUT_MS covers only the wait for the reply to start;
+  // once it streams, it is stopped only after CHAT_STREAM_IDLE_MS of silence or CHAT_STREAM_MAX_MS
+  // in total (Ethos streams about 22 tokens a second, so a long file takes minutes).
   const ac = new AbortController();
   req.on("close", () => ac.abort());
+  const limit = new AbortController();
+  let limitReason = null;
+  const stopFor = (reason) => { if (!limitReason) { limitReason = reason; limit.abort(); } };
   const startedAt = Date.now();
+  const firstByteTimer = setTimeout(() => stopFor("first_byte"), config.CHAT_UPSTREAM_TIMEOUT_MS);
+  const totalTimer = setTimeout(() => stopFor("total"), config.CHAT_STREAM_MAX_MS);
+  const clearLimits = () => { clearTimeout(firstByteTimer); clearTimeout(totalTimer); };
+  res.on("close", clearLimits);
 
   let upstream;
   try {
@@ -174,17 +185,20 @@ async function proxyChatCompletion(req, res) {
       method: "POST",
       headers: { "content-type": "application/json", accept: stream ? "text/event-stream" : "application/json", ...(provider.apiKey ? { authorization: `Bearer ${provider.apiKey}` } : {}) },
       body: JSON.stringify(upstreamBody),
-      signal: AbortSignal.any ? AbortSignal.any([ac.signal, AbortSignal.timeout(config.CHAT_UPSTREAM_TIMEOUT_MS)]) : ac.signal,
+      signal: AbortSignal.any([ac.signal, limit.signal]),
     });
   } catch (err) {
     release();
+    clearLimits();
     if (ac.signal.aborted) return;
     logger.error("model gateway upstream failed", { provider: model.provider, error: err.message });
     throw new HttpError(503, `${model.name} is unavailable. Try again shortly or pick another model.`, "upstream_unavailable");
   }
 
+  clearTimeout(firstByteTimer);
   if (!upstream.ok) {
     release();
+    clearLimits();
     const text = await upstream.text().catch(() => "");
     logger.warn("model gateway upstream error", { provider: model.provider, status: upstream.status, body: text.slice(0, 300) });
     const status = upstream.status === 429 ? 429 : upstream.status >= 500 ? 503 : 502;
@@ -210,7 +224,11 @@ async function proxyChatCompletion(req, res) {
 
   if (!stream) {
     const json = await upstream.json().catch(() => null);
-    if (!json) throw new HttpError(502, "Invalid upstream response.", "upstream_error");
+    clearLimits();
+    if (!json) {
+      release();
+      throw new HttpError(502, "Invalid upstream response.", "upstream_error");
+    }
     finish(json.usage, "ok");
     return res.json(createSanitizer(model).completion(json));
   }
@@ -220,6 +238,9 @@ async function proxyChatCompletion(req, res) {
   res.flushHeaders();
 
   const sanitizer = createSanitizer(model);
+  let idleTimer = null;
+  const resetIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => stopFor("idle"), config.CHAT_STREAM_IDLE_MS); };
+  resetIdle();
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -229,6 +250,7 @@ async function proxyChatCompletion(req, res) {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      resetIdle();
       const text = decoder.decode(value, { stream: true });
       streamedChars += text.length;
       buffer += text;
@@ -250,9 +272,17 @@ async function proxyChatCompletion(req, res) {
       if (out) res.write(out);
     }
   } catch (err) {
-    status = ac.signal.aborted ? "aborted" : "error";
-    if (!ac.signal.aborted) logger.warn("model gateway stream interrupted", { error: err.message });
+    status = ac.signal.aborted ? "aborted" : limitReason ? `timeout_${limitReason}` : "error";
+    if (!ac.signal.aborted) {
+      logger.warn("model gateway stream interrupted", { provider: model.provider, reason: limitReason || err.message, ms: Date.now() - startedAt });
+      // Tell the IDE instead of ending silently, so a half-written tool call is not mistaken for
+      // the model running out of room.
+      const message = limitReason === "idle" ? `${model.name} stopped responding. Try again.` : `${model.name}'s reply was interrupted. Try again.`;
+      try { res.write(`data: ${JSON.stringify({ error: { message } })}\n\n`); } catch { /* client gone */ }
+    }
   } finally {
+    clearTimeout(idleTimer);
+    clearLimits();
     finish(lastUsage, status);
     try { res.end(); } catch { /* ignore */ }
   }
