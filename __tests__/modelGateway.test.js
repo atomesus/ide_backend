@@ -154,6 +154,12 @@ describe("model gateway", () => {
     expect(gateway.adaptBody(ethos, { messages: [] }, false).max_tokens).toBe(8192);
     expect(gateway.adaptBody(ethos, { messages: [], max_tokens: 100, max_completion_tokens: 4096 }, false)).toMatchObject({ max_tokens: 100 });
     expect("max_completion_tokens" in gateway.adaptBody(ethos, { messages: [], max_completion_tokens: 4096 }, false)).toBe(false);
+    const gpt = gateway.findModel("gpt-6.1-sol");
+    const tools = [{ type: "function", function: { name: "read_file", parameters: {} } }];
+    // OpenAI refuses tools + reasoning_effort on chat completions for gpt-6-luna.
+    expect(gateway.adaptBody(gpt, { messages: [], tools, reasoning_effort: "medium" }, true)).toMatchObject({ model: "gpt-6-luna", reasoning_effort: "none", tools });
+    expect(gateway.adaptBody(gpt, { messages: [], reasoning_effort: "medium" }, true).reasoning_effort).toBe("medium");
+    expect("reasoning_effort" in gateway.adaptBody(gpt, { messages: [], tools }, true)).toBe(false);
   });
 
   it("prices cached input at the cache rate and long Haiku prompts at the long-context rate", () => {
