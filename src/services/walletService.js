@@ -12,10 +12,23 @@ const PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
  * each top-up count once even when two requests race; a lost race is silent.
  * Top-up credits never expire with the billing period.
  */
+let warnedTopUpsUnavailable = false;
+
 async function applyPaidTopUps(wallet) {
   const applied = await IdeWalletTopUp.findAll({ where: { userId: wallet.userId }, attributes: ["topUpId"] });
   const seen = applied.map((r) => r.topUpId);
-  const pending = await IdeTopUp.findAll({ where: { userId: wallet.userId, status: "paid", ...(seen.length ? { id: { [Op.notIn]: seen } } : {}) } });
+  let pending;
+  try {
+    pending = await IdeTopUp.findAll({ where: { userId: wallet.userId, status: "paid", ...(seen.length ? { id: { [Op.notIn]: seen } } : {}) } });
+  } catch (err) {
+    // The platform owns IdeTopUps; until it has deployed that table (or when it is
+    // unreachable) the wallet must still work without top-ups.
+    if (!warnedTopUpsUnavailable) {
+      warnedTopUpsUnavailable = true;
+      logger.warn("platform top-ups unavailable; serving wallets without them", { error: err.message });
+    }
+    return 0;
+  }
   let added = 0;
   for (const topUp of pending) {
     try {

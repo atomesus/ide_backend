@@ -72,4 +72,15 @@ describe("wallet top-ups", () => {
     expect(await IdeWallet.findByPk(user.id)).toBeNull();
     expect(await IdeWalletTopUp.count({ where: { userId: user.id } })).toBe(0);
   });
+
+  it("still serves the wallet when the platform's IdeTopUps table does not exist yet", async () => {
+    const { token } = await createPlatformUser(app, { idePlan: "ide_299" });
+    await IdeTopUp.drop();
+    try {
+      const res = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
+      expect(res.body.wallet).toMatchObject({ subscriptionCredits: "172.00", topUpCredits: "0.00" });
+    } finally {
+      await IdeTopUp.sync();
+    }
+  });
 });
