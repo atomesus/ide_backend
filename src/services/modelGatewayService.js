@@ -17,6 +17,7 @@ const usage = require("./usageService");
 const users = require("./userService");
 const logger = require("../lib/logger");
 const { createSanitizer, restoreToolCallIds } = require("./responseSanitizer");
+const { regionFor, planPricesText } = require("../lib/region");
 
 /** Models whose provider is configured on this server, in catalog order. */
 function listModels() {
@@ -136,7 +137,7 @@ async function proxyChatCompletion(req, res) {
   const body = req.body || {};
   const ent = users.entitlements(user);
   if (!ent.paid) {
-    throw new HttpError(402, "Atomesus models need an IDE plan (Rs 299 / Rs 999, or $4 / $10 outside India). Get one at atomesus.com/code.", "plan_required");
+    throw new HttpError(402, `Atomesus models need an IDE plan (${planPricesText(regionFor(req, user))}). Get one at atomesus.com/code.`, "plan_required");
   }
   if (!ent.hostedModels) {
     throw new HttpError(402, "Your IDE plan does not include Atomesus models. Use your own API key, or change plan at atomesus.com/code.", "plan_required");

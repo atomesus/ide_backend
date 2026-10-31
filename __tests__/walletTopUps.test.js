@@ -78,6 +78,30 @@ describe("wallet top-ups", () => {
     expect(new Date(limits.resetsAt).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it("tells the IDE to show rupees in India and dollars elsewhere, like the platform's payment routing", async () => {
+    const indian = await createPlatformUser(app, { idePlan: "ide_299" });
+    const usageFrom = async (u, country) => {
+      const r = request(app).get("/api/usage").set("authorization", `Bearer ${u.token}`);
+      if (country) r.set("cf-ipcountry", country);
+      return (await r.expect(200)).body;
+    };
+    expect(await usageFrom(indian, "IN")).toMatchObject({ region: "IN", currency: "INR" });
+    // The IP country wins over the account country, as at checkout.
+    expect(await usageFrom(indian, "US")).toMatchObject({ region: "INTL", currency: "USD" });
+    // No usable IP country: the account's country, and India for old accounts without one.
+    const american = await createPlatformUser(app, { country: "United States" });
+    expect(await usageFrom(american)).toMatchObject({ region: "INTL", currency: "USD" });
+    expect(await usageFrom(american, "XX")).toMatchObject({ region: "INTL", currency: "USD" });
+    expect(await usageFrom(await createPlatformUser(app))).toMatchObject({ region: "IN", currency: "INR" });
+    expect(await usageFrom(await createPlatformUser(app, { country: "India" }))).toMatchObject({ region: "IN", currency: "INR" });
+
+    // The plan-required message names the prices in the user's currency.
+    global.fetch = jest.fn();
+    const send = (u, country) => request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${u.token}`).set("cf-ipcountry", country).send({ model: "ethos-6", messages: [{ role: "user", content: "hi" }] }).expect(402);
+    expect((await send(american, "US")).body.message).toMatch(/\$4 or \$10/);
+    expect((await send(american, "IN")).body.message).toMatch(/₹299 or ₹999/);
+  });
+
   it("the budget message points at top-ups", async () => {
     const { token, user } = await createPlatformUser(app, { idePlan: "ide_299" });
     await wallets.ensureWallet(await users.findById(user.id));

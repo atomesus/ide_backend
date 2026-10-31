@@ -13,6 +13,6 @@ router.post("/v1/chat/completions", requireAuth(true), limiters.chat, express.js
   await gateway.proxyChatCompletion(req, res);
 });
 
-router.get("/usage", requireAuth(true), async (req, res) => res.json(await usage.usageSummary(req.user)));
+router.get("/usage", requireAuth(true), async (req, res) => res.json(await usage.usageSummary(req.user, req)));
 
 module.exports = router;

@@ -4,6 +4,7 @@ const { config } = require("../config/env");
 const wallets = require("./walletService");
 const { planOf, monthlyCreditsFor, entitlements, CREDITS_PER_RUPEE } = require("./userService");
 const logger = require("../lib/logger");
+const { regionFor, currencyFor } = require("../lib/region");
 
 /** Provider cost of one request in USD, from the model's list prices. */
 function costUsd({ promptTokens = 0, cachedTokens = 0, completionTokens = 0 }, model) {
@@ -59,7 +60,7 @@ const PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
  * Remaining = everything spendable / (this period's plan allowance + unspent top-ups). It only
  * falls while models are used, rises after a top-up, and is 0 exactly when requests are refused.
  */
-async function usageSummary(user) {
+async function usageSummary(user, req) {
   const wallet = await wallets.ensureWallet(user);
   const plan = planOf(user);
   const ent = entitlements(user);
@@ -72,8 +73,12 @@ async function usageSummary(user) {
   if (left > 0 && remainingPercent === 0) remainingPercent = 1;
   const status = !ent.hostedModels ? "none" : left <= 0 ? "exhausted" : remainingPercent <= LOW_PERCENT ? "low" : "ok";
   const periodStart = wallet.billingPeriodStart ? new Date(wallet.billingPeriodStart) : new Date();
+  // Which currency the IDE shows prices in (plans, Add credits): rupees in India, dollars elsewhere.
+  const region = regionFor(req, user);
   return {
     plan,
+    region,
+    currency: currencyFor(region),
     entitlements: ent,
     limits: {
       plan,
