@@ -19,8 +19,6 @@ function creditsFor(tokens, model) {
   return Math.ceil(costUsd(tokens, model) * config.USD_INR_RATE * CREDITS_PER_RUPEE);
 }
 
-const rupees = (credits) => (Math.max(0, credits) / CREDITS_PER_RUPEE).toFixed(2);
-
 /** Credits the user can still spend right now. */
 async function availableFor(user) {
   return wallets.available(await wallets.ensureWallet(user));
@@ -49,31 +47,42 @@ async function recordUsage(user, event) {
   return credits;
 }
 
-async function sumCredits(userId, since) {
-  if (!isMongoReady()) return null;
-  const [row] = await UsageEvent.aggregate([{ $match: { userId, at: { $gte: since } } }, { $group: { _id: null, total: { $sum: "$creditsDeducted" } } }]);
-  return row?.total ?? 0;
-}
+/** Below this share of the budget left, the IDE warns that it is running out. */
+const LOW_PERCENT = 10;
+const PERIOD_MS = 30 * 24 * 60 * 60 * 1000;
 
-/** GET /api/usage payload in the shape the IDE parses (common/orbitProviderUsage.ts). */
+/**
+ * GET /api/usage payload (parsed by the IDE's common/orbitProviderUsage.ts). It says only how much
+ * of the allowance is left, as a percentage, and when it refills: no rupee amounts, credits or
+ * tokens, so nobody can work out what a request costs or which provider served it.
+ *
+ * Remaining = everything spendable / (this period's plan allowance + unspent top-ups). It only
+ * falls while models are used, rises after a top-up, and is 0 exactly when requests are refused.
+ */
 async function usageSummary(user) {
   const wallet = await wallets.ensureWallet(user);
-  const periodStart = wallet.billingPeriodStart ? new Date(wallet.billingPeriodStart) : new Date();
-  const [period, last30] = await Promise.all([sumCredits(user.id, periodStart), sumCredits(user.id, new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))]);
   const plan = planOf(user);
-  // Amounts are rupees with two decimals (the IDE shows them with the currency below).
+  const ent = entitlements(user);
+  const monthly = monthlyCreditsFor(plan);
+  const sub = Math.max(0, wallet.subscriptionCredits || 0);
+  const top = Math.max(0, wallet.topUpCredits || 0);
+  const total = monthly + top;
+  const left = sub + top;
+  let remainingPercent = total > 0 ? Math.floor((left / total) * 100) : 0;
+  if (left > 0 && remainingPercent === 0) remainingPercent = 1;
+  const status = !ent.hostedModels ? "none" : left <= 0 ? "exhausted" : remainingPercent <= LOW_PERCENT ? "low" : "ok";
+  const periodStart = wallet.billingPeriodStart ? new Date(wallet.billingPeriodStart) : new Date();
   return {
-    currency: "INR",
-    wallet: {
-      availableCredits: rupees(wallets.available(wallet)),
-      subscriptionCredits: rupees(wallet.subscriptionCredits || 0),
-      topUpCredits: rupees(wallet.topUpCredits || 0),
+    plan,
+    entitlements: ent,
+    limits: {
+      plan,
+      remainingPercent: ent.hostedModels ? remainingPercent : 0,
+      status,
+      resetsAt: new Date(periodStart.getTime() + PERIOD_MS).toISOString(),
+      hasTopUp: top > 0,
     },
-    limits: { plan, monthlyCredits: rupees(monthlyCreditsFor(plan)) },
-    entitlements: entitlements(user),
     topUpUrl: "https://www.atomesus.com/code#topup",
-    billingPeriod: period == null ? null : { start: periodStart.toISOString(), totalCreditsDeducted: Number(rupees(period)) },
-    last30Days: { totalCreditsDeducted: Number(rupees(last30 ?? 0)) },
   };
 }
 

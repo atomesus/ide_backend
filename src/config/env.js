@@ -114,7 +114,11 @@ const schema = z.object({
   CHAT_UPSTREAM_TIMEOUT_MS: int(90000),
 
   // Money. Wallets are kept in credits of Rs 0.0001; model prices are in USD.
-  USD_INR_RATE: z.string().optional().transform((v) => (v && Number(v) > 0 ? Number(v) : 90)),
+  // Rupees charged per US dollar of provider cost. Keep it above the market rate (about 95 in
+  // late 2026) or the plans lose margin: the budgets assume a rupee of credit costs a rupee.
+  USD_INR_RATE: z.string().optional().transform((v) => (v && Number(v) > 0 ? Number(v) : 100)),
+  // Key for the encrypted tool-call ids the gateway hands out; defaults to one derived from other secrets.
+  GATEWAY_ID_SECRET: str(""),
   // JSON object: IDE plan key -> monthly hosted-model budget in rupees (30% margin after
   // GST and payment fees). Keys: ide_299, ide_999 (India, INR) and *_intl (USD plans).
   IDE_PLAN_ALLOWANCES_INR: str('{"ide_299":172,"ide_999":576,"ide_299_intl":220,"ide_999_intl":580}'),
@@ -172,6 +176,7 @@ function auditConfig(c) {
   if (!c.ATOMESUS_BASE_URL) warnings.push("ATOMESUS_BASE_URL unset: Ethos models are hidden");
   if (!c.CLAUDE_API_KEY) warnings.push("CLAUDE_API_KEY unset: Claude models are hidden");
   if (!c.OPENAI_API_KEY) warnings.push("OPENAI_API_KEY unset: GPT models are hidden");
+  if (c.USD_INR_RATE < 95) warnings.push(`USD_INR_RATE=${c.USD_INR_RATE} is below the market rate (about 95): every rupee of model budget costs more than a rupee, so the plans lose margin. Use 100.`);
   if (Object.keys(c.planAllowancesInr || {}).length === 0) warnings.push("IDE_PLAN_ALLOWANCES_INR unset: no plan gets hosted models (BYOK still works on paid plans)");
   if (c.isProd && !c.API_PUBLIC_URL.startsWith("https://")) errors.push("API_PUBLIC_URL must be https in production");
   if (c.isProd && !c.WEB_APP_URL.startsWith("https://")) errors.push("WEB_APP_URL must be the https website that hosts /desktop/login");

@@ -16,6 +16,7 @@ const { kv } = require("../db/redis");
 const usage = require("./usageService");
 const users = require("./userService");
 const logger = require("../lib/logger");
+const { createSanitizer, restoreToolCallIds } = require("./responseSanitizer");
 
 /** Models whose provider is configured on this server, in catalog order. */
 function listModels() {
@@ -32,23 +33,18 @@ function findModel(id) {
  * Only the catalog id and name are sent; `upstreamModel` stays on this server.
  */
 function modelsResponse() {
-  // The IDE reads these as USD per token (x 1e6 = vendor list price per million tokens).
-  const perToken = (usdPerMTok) => usdPerMTok / 1e6;
+  // Names and capabilities only: no provider, prices or token sizes (see responseSanitizer.js).
   return {
     object: "list",
     data: listModels().map((m) => ({
       id: m.id,
       object: "model",
-      owned_by: m.provider === "atomesus" ? "atomesus" : m.provider,
+      owned_by: "atomesus",
       name: m.name,
       orbit: {
         displayName: m.name,
-        provider: m.provider,
-        contextWindow: m.contextWindow,
         supportsTools: m.supportsTools,
         supportsReasoning: m.supportsReasoning,
-        inputCreditMultiplier: perToken(m.priceUsdPerMTok.input),
-        outputCreditMultiplier: perToken(m.priceUsdPerMTok.output),
       },
     })),
   };
@@ -66,6 +62,7 @@ function upstreamUrl(provider = "atomesus") {
 /** Provider-specific request fixes for the OpenAI-style body the IDE sends. */
 function adaptBody(model, body, stream) {
   const out = { ...body, model: model.upstreamModel || model.id, stream };
+  if (Array.isArray(out.messages)) out.messages = restoreToolCallIds(out.messages);
   if (stream) out.stream_options = { ...(body.stream_options || {}), include_usage: true };
   delete out.user;
   if (model.provider === "openai" && out.max_tokens != null && out.max_completion_tokens == null) {
@@ -214,14 +211,14 @@ async function proxyChatCompletion(req, res) {
     const json = await upstream.json().catch(() => null);
     if (!json) throw new HttpError(502, "Invalid upstream response.", "upstream_error");
     finish(json.usage, "ok");
-    if (json.model) json.model = model.id;
-    return res.json(json);
+    return res.json(createSanitizer(model).completion(json));
   }
 
   res.status(200);
   res.set({ "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
   res.flushHeaders();
 
+  const sanitizer = createSanitizer(model);
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -239,12 +236,18 @@ async function proxyChatCompletion(req, res) {
       while ((idx = buffer.indexOf("\n")) >= 0) {
         const rawLine = buffer.slice(0, idx + 1);
         buffer = buffer.slice(idx + 1);
-        res.write(publicizeModel(model, rawLine));
         const u = extractUsage(rawLine.trim());
         if (u) lastUsage = u;
+        const out = sanitizer.sseLine(rawLine);
+        if (out) res.write(out);
       }
     }
-    if (buffer) res.write(publicizeModel(model, buffer));
+    if (buffer) {
+      const u = extractUsage(buffer.trim());
+      if (u) lastUsage = u;
+      const out = sanitizer.sseLine(buffer);
+      if (out) res.write(out);
+    }
   } catch (err) {
     status = ac.signal.aborted ? "aborted" : "error";
     if (!ac.signal.aborted) logger.warn("model gateway stream interrupted", { error: err.message });

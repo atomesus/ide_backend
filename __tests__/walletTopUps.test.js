@@ -20,10 +20,13 @@ describe("wallet top-ups", () => {
     await paidTopUp(user.id, 100000);
     await IdeTopUp.create({ id: randomUUID(), userId: user.id, provider: "razorpay", currency: "INR", amountMinor: 10000, walletCredits: 999999, status: "created" });
     const first = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
-    expect(first.body.wallet).toMatchObject({ subscriptionCredits: "172.00", topUpCredits: "67.53", availableCredits: "239.53" });
+    // Rs 172 plan + Rs 67.53 of top-ups, nothing spent: 100% left, with a top-up in the wallet.
+    expect(first.body.limits).toMatchObject({ remainingPercent: 100, status: "ok", hasTopUp: true });
+    expect(await IdeWallet.findByPk(user.id)).toMatchObject({ subscriptionCredits: 1720000, topUpCredits: 675300 });
     expect(first.body.topUpUrl).toBe("https://www.atomesus.com/code#topup");
     const again = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
-    expect(again.body.wallet.topUpCredits).toBe("67.53");
+    expect((await IdeWallet.findByPk(user.id)).topUpCredits).toBe(675300);
+    expect(again.body.limits.hasTopUp).toBe(true);
     expect(await IdeWalletTopUp.count({ where: { userId: user.id } })).toBe(2);
   });
 
@@ -47,12 +50,32 @@ describe("wallet top-ups", () => {
     const { token, user } = await createPlatformUser(app);
     await paidTopUp(user.id, 10000);
     const usage = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
-    expect(usage.body.wallet.topUpCredits).toBe("1.00");
+    expect((await IdeWallet.findByPk(user.id)).topUpCredits).toBe(10000);
+    expect(usage.body.limits).toMatchObject({ remainingPercent: 0, status: "none", hasTopUp: true });
     expect(usage.body.entitlements.paid).toBe(false);
     global.fetch = jest.fn();
     const chat = await request(app).post("/api/v1/chat/completions").set("authorization", `Bearer ${token}`).send({ model: "opus-5.5", messages: [{ role: "user", content: "hi" }] }).expect(402);
     expect(chat.body.error.code).toBe("plan_required");
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("reports only the share of the budget left, falling to low and then exhausted", async () => {
+    const { token, user } = await createPlatformUser(app, { idePlan: "ide_299" });
+    const pct = async () => (await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200)).body.limits;
+    expect(await pct()).toMatchObject({ remainingPercent: 100, status: "ok" });
+    await IdeWallet.update({ subscriptionCredits: 860000 }, { where: { userId: user.id } });
+    expect(await pct()).toMatchObject({ remainingPercent: 50, status: "ok" });
+    await IdeWallet.update({ subscriptionCredits: 100000 }, { where: { userId: user.id } });
+    expect(await pct()).toMatchObject({ remainingPercent: 5, status: "low" });
+    await IdeWallet.update({ subscriptionCredits: 1 }, { where: { userId: user.id } });
+    expect(await pct()).toMatchObject({ remainingPercent: 1, status: "low" });
+    await IdeWallet.update({ subscriptionCredits: 0 }, { where: { userId: user.id } });
+    expect(await pct()).toMatchObject({ remainingPercent: 0, status: "exhausted" });
+    // A top-up while the plan budget is gone: everything left is top-up.
+    await paidTopUp(user.id, 860000);
+    expect(await pct()).toMatchObject({ remainingPercent: 33, status: "ok", hasTopUp: true });
+    const limits = await pct();
+    expect(new Date(limits.resetsAt).getTime()).toBeGreaterThan(Date.now());
   });
 
   it("the budget message points at top-ups", async () => {
@@ -78,7 +101,7 @@ describe("wallet top-ups", () => {
     await IdeTopUp.drop();
     try {
       const res = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
-      expect(res.body.wallet).toMatchObject({ subscriptionCredits: "172.00", topUpCredits: "0.00" });
+      expect(res.body.limits).toMatchObject({ remainingPercent: 100, status: "ok", hasTopUp: false });
     } finally {
       await IdeTopUp.sync();
     }

@@ -109,7 +109,7 @@ GET  /api/v1/models            { data: [{ id, name, orbit: { displayName, contex
 POST /api/v1/chat/completions  OpenAI-style body with a catalog model id; SSE passthrough to the
                                model's provider; usage chunk → credits deducted; 402 plan_required /
                                insufficient_credits, 429 usage_limit_exceeded, 503 gateway unavailable
-GET  /api/usage                { wallet, limits, entitlements, billingPeriod, last30Days }
+GET  /api/usage                { plan, entitlements, limits: { remainingPercent, status, resetsAt, hasTopUp } } (no amounts or tokens)
 ```
 
 Catalog (`src/config/models.js`): paid IDE plans get exactly these; free accounts get 402 `plan_required`.

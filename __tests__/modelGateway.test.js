@@ -37,12 +37,11 @@ describe("model gateway", () => {
     const byId = Object.fromEntries(res.body.data.map((m) => [m.id, m]));
     expect(Object.keys(byId)).toEqual(["ethos-6", "opus-5.5", "gpt-6.1-sol"]);
     expect(byId["opus-5.5"].name).toBe("Opus 5.5");
-    expect(byId["opus-5.5"].orbit).toMatchObject({ displayName: "Opus 5.5", provider: "anthropic", contextWindow: 100000 });
-    expect(byId["gpt-6.1-sol"].orbit).toMatchObject({ displayName: "GPT-6.1 Sol", provider: "openai", supportsReasoning: true });
-    expect(byId["gpt-6.1-sol"].orbit.inputCreditMultiplier * 1e6).toBeCloseTo(0.2);
-    expect(byId["gpt-6.1-sol"].orbit.outputCreditMultiplier * 1e6).toBeCloseTo(1);
-    // The upstream ids stay on the server.
-    expect(res.text).not.toMatch(/haiku|luna|upstreamModel/i);
+    expect(Object.keys(byId["opus-5.5"].orbit).sort()).toEqual(["displayName", "supportsReasoning", "supportsTools"]);
+    expect(byId["gpt-6.1-sol"].orbit).toMatchObject({ displayName: "GPT-6.1 Sol", supportsReasoning: true });
+    // Nothing that names the provider, prices a token or sizes the model leaves the server.
+    expect(res.body.data.every((m) => m.owned_by === "atomesus")).toBe(true);
+    expect(res.text).not.toMatch(/haiku|luna|upstreamModel|anthropic|openai|claude|gpt-6-|Multiplier|price|contextWindow|token/i);
     expect(res.body.data.every((m) => m.upstreamModel === undefined)).toBe(true);
   });
 
@@ -101,22 +100,59 @@ describe("model gateway", () => {
     const w = await IdeWallet.findByPk(user.id);
     expect(w.subscriptionCredits).toBe(1720000 - 15000 - 30000);
     const usage = await request(app).get("/api/usage").set("authorization", `Bearer ${token}`).expect(200);
-    expect(usage.body.wallet.availableCredits).toBe("167.50");
+    // 167.50 of 172 left -> 97%; the IDE only ever sees the percentage.
+    expect(usage.body.limits).toMatchObject({ plan: "ide_299", remainingPercent: 97, status: "ok", hasTopUp: false });
+    expect(JSON.stringify(usage.body)).not.toMatch(/credit|rupee|wallet|token|167|172/i);
   });
 
-  it("rewrites the upstream model id in non-streamed answers and split stream chunks", async () => {
+  it("sends the IDE no token counts, fingerprints, provider ids or upstream names", async () => {
     const { token } = await createPlatformUser(app, { idePlan: "ide_299" });
-    global.fetch = jest.fn(async () => new Response(JSON.stringify({ id: "1", model: "claude-haiku-5-5", choices: [{ message: { role: "assistant", content: "Hi" } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } }));
+    global.fetch = jest.fn(async () => new Response(JSON.stringify({ id: "msg_01abc", model: "claude-haiku-5-5", system_fingerprint: "fp_x", choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop", logprobs: null }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), { status: 200, headers: { "content-type": "application/json" } }));
     const res = await chat(token, "opus-5.5", { stream: false }).expect(200);
-    expect(res.body.model).toBe("opus-5.5");
-    const line = 'data: {"id":"1","model":"gpt-6-luna","choices":[]}\n\n';
+    expect(res.body).toMatchObject({ object: "chat.completion", model: "opus-5.5", choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }] });
+    expect(res.body.id).toMatch(/^chatcmpl-[0-9a-f]{24}$/);
+    expect(res.text).not.toMatch(/usage|fingerprint|msg_01|haiku|logprobs|tokens/);
+
+    // vLLM-style stream: extras on every chunk, a usage-only chunk, and a line split across reads.
+    const line = 'data: {"id":"chatcmpl-96c3","model":"gpt-6-luna","system_fingerprint":"vllm-0.29.0-tp4","service_tier":null,"choices":[{"index":0,"delta":{"content":"Yo"},"token_ids":null,"routed_experts":null,"stop_reason":null}]}\n\n';
+    const usageLine = 'data: {"id":"chatcmpl-96c3","choices":[],"usage":{"prompt_tokens":14,"total_tokens":19,"completion_tokens":5}}\n\n';
     const enc = new TextEncoder();
     global.fetch = jest.fn(async () => new Response(new ReadableStream({
-      start(c) { c.enqueue(enc.encode(line.slice(0, 25))); c.enqueue(enc.encode(line.slice(25))); c.enqueue(enc.encode("data: [DONE]")); c.close(); },
+      start(c) { c.enqueue(enc.encode(line.slice(0, 25))); c.enqueue(enc.encode(line.slice(25) + usageLine)); c.enqueue(enc.encode("data: [DONE]")); c.close(); },
     }), { status: 200, headers: { "content-type": "text/event-stream" } }));
     const res2 = await chat(token, "gpt-6.1-sol").expect(200);
-    expect(res2.text).toBe('data: {"id":"1","model":"gpt-6.1-sol","choices":[]}\n\ndata: [DONE]');
-    expect(gateway.publicizeModel({ id: "a", upstreamModel: "b" }, '{"model":"b","x":"b"}')).toBe('{"model":"a","x":"a"}');
+    const events = res2.text.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6));
+    expect(events[events.length - 1]).toBe("[DONE]");
+    expect(events.length).toBe(2);
+    expect(JSON.parse(events[0])).toEqual({ id: expect.stringMatching(/^chatcmpl-/), object: "chat.completion.chunk", created: expect.any(Number), model: "gpt-6.1-sol", choices: [{ index: 0, delta: { content: "Yo" }, finish_reason: null }] });
+    expect(res2.text).not.toMatch(/vllm|fingerprint|usage|token|luna|96c3|experts|service_tier/);
+  });
+
+  it("hides provider tool-call ids and restores them when the IDE sends them back", async () => {
+    const { token } = await createPlatformUser(app, { idePlan: "ide_299" });
+    const bodies = [];
+    global.fetch = jest.fn(async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return new Response(sse([
+        'data: {"id":"1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_01ABCdef","type":"function","function":{"name":"read_file","arguments":""}}]}}]}',
+        'data: {"id":"1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"a\\"}"}}]},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+      ]), { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+    const res = await chat(token, "opus-5.5").expect(200);
+    expect(res.text).not.toMatch(/toolu_/);
+    const first = JSON.parse(res.text.split("\n").find((l) => l.includes("tool_calls")).slice(6));
+    const publicId = first.choices[0].delta.tool_calls[0].id;
+    expect(publicId).toMatch(/^call_at/);
+    expect(first.choices[0].delta.tool_calls[0].function.name).toBe("read_file");
+    // The next turn carries the opaque id; the provider gets its own id back.
+    await chat(token, "opus-5.5", { messages: [
+      { role: "user", content: "read a" },
+      { role: "assistant", content: null, tool_calls: [{ id: publicId, type: "function", function: { name: "read_file", arguments: '{"path":"a"}' } }] },
+      { role: "tool", tool_call_id: publicId, content: "PAPAYA" },
+    ] }).expect(200);
+    expect(bodies[1].messages[1].tool_calls[0].id).toBe("toolu_01ABCdef");
+    expect(bodies[1].messages[2].tool_call_id).toBe("toolu_01ABCdef");
   });
 
   it("answers 402 when the month's budget is used up", async () => {
