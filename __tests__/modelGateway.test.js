@@ -159,7 +159,7 @@ describe("model gateway", () => {
     // OpenAI refuses tools + reasoning_effort on chat completions for gpt-6-luna.
     expect(gateway.adaptBody(gpt, { messages: [], tools, reasoning_effort: "medium" }, true)).toMatchObject({ model: "gpt-6-luna", reasoning_effort: "none", tools });
     expect(gateway.adaptBody(gpt, { messages: [], reasoning_effort: "medium" }, true).reasoning_effort).toBe("medium");
-    expect("reasoning_effort" in gateway.adaptBody(gpt, { messages: [], tools }, true)).toBe(false);
+    expect(gateway.adaptBody(gpt, { messages: [], tools }, true).reasoning_effort).toBe("none");
   });
 
   it("prices cached input at the cache rate and long Haiku prompts at the long-context rate", () => {

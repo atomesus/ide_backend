@@ -73,9 +73,9 @@ function adaptBody(model, body, stream) {
     out.max_completion_tokens = out.max_tokens;
     delete out.max_tokens;
   }
-  if (model.provider === "openai" && Array.isArray(out.tools) && out.tools.length && out.reasoning_effort && out.reasoning_effort !== "none") {
-    // OpenAI rejects function tools together with reasoning_effort on /v1/chat/completions
-    // ("set reasoning_effort to 'none'"); the IDE sends both in Agent mode.
+  if (model.provider === "openai" && Array.isArray(out.tools) && out.tools.length) {
+    // OpenAI rejects function tools on /v1/chat/completions unless reasoning_effort is
+    // explicitly "none" (the model's default reasoning counts too); the IDE sends tools in Agent mode.
     out.reasoning_effort = "none";
   }
   if (model.provider === "anthropic" && out.max_tokens == null && out.max_completion_tokens == null) {
